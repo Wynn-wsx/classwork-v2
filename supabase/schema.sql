@@ -11,7 +11,7 @@
 -- is_supervisor_now -> current_week_key）。关闭“创建函数时校验函数体”，
 -- 函数首次被调用时仍会完整校验，不影响运行期正确性。
 set check_function_bodies = off;
---  生成时间：2026-10-31 23:33:25
+--  生成时间：2026-11-01 02:09:44
 
 --  【脚本目录】（在 SQL Editor 里搜索下面的标题文字可快速定位）
 --   1. 扩展（pgcrypto）
@@ -3201,6 +3201,7 @@ declare
   v_penalty_rows jsonb;
   v_auto       int;
   v_rec_cnt    int := 0;
+  v_in_progress boolean := false;
 begin
   select * into v_b from public.boundaries where id = p_boundary_id;
   if v_b.id is null then
@@ -3210,30 +3211,45 @@ begin
     raise exception '该分隔点不是月分隔点';
   end if;
 
-  select * into v_st from public.settlements
-   where boundary_id = p_boundary_id and status <> 'rolled_back';
-  if v_st.id is not null and v_st.status = 'done' then
-    return v_st.summary;
-  end if;
-
   if v_b.start_date is null then
     raise exception '该月周期缺少起始日期，请先在「设置 → 周期定义」补全';
   end if;
-  if v_b.end_date is null then
-    raise exception '该月周期尚未结束（未填结束日期），不能结算';
-  end if;
+
+  -- V2.1.1：允许对「进行中」的月周期结算，结算范围截至今天；同一周期多次结算以最新一次为准
+  v_in_progress := v_b.end_date is null;
   v_sd := v_b.start_date;
-  v_ed := v_b.end_date + 1;                       -- 取不含上界
+  v_ed := coalesce(v_b.end_date, public.bj_today()) + 1;   -- 取不含上界
   v_start := v_sd::timestamp at time zone 'Asia/Shanghai';
   v_end   := v_ed::timestamp at time zone 'Asia/Shanghai';
   v_month_key := v_b.period_key;
 
-  -- 维护窗口（设计：月结算期间全站只读 30 分钟）
-  update public.app_config
-     set maintenance_until = greatest(coalesce(maintenance_until, v_b.boundary_at), v_b.boundary_at)
-                             + make_interval(mins => maintenance_minutes),
-         updated_at = now()
-   where id = 1;
+  select * into v_st from public.settlements
+   where boundary_id = p_boundary_id and status <> 'rolled_back';
+  if v_st.id is not null and v_st.status = 'done' then
+    if not v_in_progress then
+      return v_st.summary;                        -- 已结束的周期：幂等返回既有结算
+    end if;
+    -- 进行中的周期：允许重算，把上一次结算标记为回滚，并清掉上次生成的次数与抽选
+    update public.settlements
+       set status = 'rolled_back',
+           note = coalesce(nullif(note, ''), '') || '（进行中周期重新结算覆盖）'
+     where id = v_st.id;
+    delete from public.lottery_draws
+     where period_key = v_month_key
+       and source in ('auto', 'monthly_group_penalty', 'weekly_group', 'weekly_group_reward', 'weekly_group_penalty');
+    delete from public.lottery_chances where period_key = v_month_key;
+    delete from public.lottery_group_chances where period_key = v_month_key;
+    update public.boundaries set settled = false where id = p_boundary_id;
+  end if;
+
+  -- 维护窗口（设计：月结算期间全站只读 30 分钟）；进行中的周期结算不加维护锁，避免锁住正在录分的班级
+  if not v_in_progress then
+    update public.app_config
+       set maintenance_until = greatest(coalesce(maintenance_until, v_b.boundary_at), v_b.boundary_at)
+                               + make_interval(mins => maintenance_minutes),
+           updated_at = now()
+     where id = 1;
+  end if;
 
   select coalesce((public.cfg()->>'second_class_count')::int, 10),
          coalesce((public.cfg()->>'reward_threshold')::numeric, 10),
@@ -3241,8 +3257,11 @@ begin
          coalesce((public.cfg()->>'month_reward_top_n')::int, 15)
     into v_n, v_reward_thr, v_penalty_thr, v_top_n;
 
-  insert into public.settlements (period_key, boundary_id, started_at, status)
-  values (v_month_key, p_boundary_id, now(), 'running');
+  insert into public.settlements (period_key, boundary_id, started_at, status, note)
+  values (v_month_key, p_boundary_id, now(), 'running',
+          case when v_in_progress
+               then format('进行中周期结算（截至 %s）', to_char(public.bj_today(), 'YYYY-MM-DD'))
+               else null end);
 
   -- V2.0.14：当月没有任何有效记录时只写空结算，不产生任何次数/抽选/第二类名单
   select count(*) into v_rec_cnt
@@ -3259,7 +3278,7 @@ begin
       'reward', jsonb_build_object('rows', '[]'::jsonb, 'forfeit', '[]'::jsonb),
       'penalty', jsonb_build_object('rows', '[]'::jsonb),
       'auto_draw_count', 0, 'cards_expired', 0,
-      'empty_month', true, 'generated_at', now());
+      'empty_month', true, 'in_progress', v_in_progress, 'generated_at', now());
     update public.settlements
        set status = 'done', finished_at = now(), summary = v_summary,
            second_class = '[]'::jsonb, auto_draw_count = 0
@@ -3533,6 +3552,7 @@ begin
     'penalty', jsonb_build_object('rows', v_penalty_rows),
     'auto_draw_count', v_auto_total,
     'cards_expired', v_cards_exp,
+    'in_progress', v_in_progress,
     'generated_at', now()
   );
 
@@ -3543,13 +3563,15 @@ begin
   update public.boundaries set settled = true where id = p_boundary_id;
 
   perform public.notify_audience('admins', '月度结算完成',
-    format('%s 月结算完成：第二类 %s 人，自动抽选 %s 次，过期功能卡 %s 张。请核对汇总。',
-           v_month_key, jsonb_array_length(v_second), v_auto_total, v_cards_exp),
+    format('%s %s：第二类 %s 人，自动抽选 %s 次，过期功能卡 %s 张。请核对汇总。',
+           v_month_key, case when v_in_progress then '周期进行中结算完成' else '月结算完成' end,
+           jsonb_array_length(v_second), v_auto_total, v_cards_exp),
     'period', 'settlement', (select id from public.settlements
                               where boundary_id = p_boundary_id and status <> 'rolled_back' limit 1));
   perform public.write_audit('monthly_settle', 'boundary', p_boundary_id::text,
     jsonb_build_object('month_key', v_month_key, 'penalty_rank_list', jsonb_array_length(v_second),
-                       'auto_draw_count', v_auto_total, 'cards_expired', v_cards_exp));
+                       'auto_draw_count', v_auto_total, 'cards_expired', v_cards_exp,
+                       'in_progress', v_in_progress));
   return v_summary;
 end;
 $$;
@@ -5952,9 +5974,16 @@ begin
   perform public.require_role(array['super_admin','admin','executive'], '只有管理员、班主任或执行小组可以手动汇总');
 
   if p_boundary_id is null then
+    -- V2.1.1：优先「进行中」的月周期（end_date 为空），否则取最近已开始的月周期
     select * into v_b from public.boundaries
-     where type = 'month' and boundary_at <= now()
-     order by boundary_at desc limit 1;
+     where type = 'month' and start_date is not null and end_date is null
+       and start_date <= public.bj_today()
+     order by start_date desc limit 1;
+    if v_b.id is null then
+      select * into v_b from public.boundaries
+       where type = 'month' and start_date is not null and start_date <= public.bj_today()
+       order by start_date desc limit 1;
+    end if;
   else
     select * into v_b from public.boundaries where id = p_boundary_id;
   end if;
@@ -5965,8 +5994,8 @@ begin
   if v_b.type <> 'month' then
     raise exception '该分隔点不是月分隔点';
   end if;
-  if v_b.boundary_at > now() then
-    raise exception '该月尚未结束，不能汇总';
+  if v_b.boundary_at is not null and v_b.boundary_at > now() then
+    raise exception '该月尚未开始，不能汇总';
   end if;
 
   -- 月分隔点关闭的是「上一个月」，周期键按被结算的月份推导（settlements.period_key 用的是这个）
@@ -5991,7 +6020,8 @@ begin
   perform public.write_audit('admin_run_monthly_summary', 'boundary', v_b.id::text,
     jsonb_build_object('month_key', v_key));
 
-  return jsonb_build_object('month_key', v_key, 'boundary_id', v_b.id, 'summary', v_res);
+  return jsonb_build_object('month_key', v_key, 'boundary_id', v_b.id,
+    'in_progress', (v_b.end_date is null), 'summary', v_res);
 end;
 $$;
 revoke all on function public.admin_run_monthly_summary(uuid) from public, anon, authenticated;

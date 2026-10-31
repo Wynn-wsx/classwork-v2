@@ -423,7 +423,7 @@ table.data.my-list{min-width:0}
 const SUPABASE_URL = 'https://rdwbtyecityxopofjokj.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJkd2J0eWVjaXR5eG9wb2Zqb2tqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI4NDg0MzgsImV4cCI6MjEwODQyNDQzOH0.s8zcarl9bhJn1_yOtchGr1gWYCBhtM8-puiGmChFk0s';
 const EMAIL_DOMAIN = '@banji.local';
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.1.1';
 
 /* 正式版 V2.0.0：默认连接上述 Supabase 项目；本地调试时可在页面加载前注入
    window.__SB_OVERRIDE__ = { url, key } 临时指向其他项目 */
@@ -3537,14 +3537,14 @@ async function renderSettlements(){
   const head = `
     <div class="card">
       <div class="toolbar">
-        ${isTeacher()?`<button class="btn btn-primary btn-sm" onclick="runMonthlySummary()">立即结算上月</button>`:''}
+        ${isTeacher()?`<button class="btn btn-primary btn-sm" onclick="runMonthlySummary()">${mItems.some(x=>!x.boundary_at)?'结算当前月（截至今天）':'立即结算上月'}</button>`:''}
         <span class="lbl">查看周期</span>
         <select class="field" id="sumMonthSel">
           ${mItems.filter(x=>!x.boundary_at).concat(mItems.filter(x=>x.has_summary)).concat(mItems.filter(x=>!x.has_summary&&x.boundary_at).slice(0,2)).map(x=>`<option value="${esc(x.period_key)}">${esc(periodRangeText(x,'month'))}${x.has_summary?'':'（尚无结算）'}</option>`).join('')}
         </select>
         <button class="btn btn-sm" onclick="viewPeriodSummary('month')">查看该周期</button>
         ${isTeacher()?`<button class="btn btn-sm btn-primary" onclick="resumPeriod('month')">重新结算该周期</button>`:''}
-        <span class="dim small">结算不自动执行：由管理员点「立即结算上月」触发；结算后上月积分冻结、次数清零。可回看任意过去月份。</span>
+        <span class="dim small">结算不自动执行：由管理员手动触发。可结算「进行中」的月（截至今天），同一周期多次结算以最新一次为准（旧结算标记为已回滚）。</span>
       </div>
     </div>`;
   const cards = list.map(s=>{
@@ -3559,6 +3559,7 @@ async function renderSettlements(){
       <div class="toolbar">
         <h3 style="margin:0">${esc(monthPeriodLabel(s.period_key))} 月度结算</h3>
         <span class="badge-status ${st[1]}">${st[0]}</span>
+        ${sm.in_progress?`<span class="badge-status badge-warn" title="该周期尚未结束，结算范围截至结算当天；再次结算会覆盖前一次结果">进行中结算</span>`:''}
         <span class="dim small">完成于 ${s.finished_at?esc(fmtDateTime(s.finished_at)):'—'}</span>
         <span style="flex:1"></span>
         <button class="btn btn-sm" onclick='showSettlement(${JSON.stringify(s).replace(/'/g,'&#39;')})'>查看明细</button>
