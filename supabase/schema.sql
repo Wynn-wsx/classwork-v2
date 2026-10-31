@@ -11,7 +11,7 @@
 -- is_supervisor_now -> current_week_key）。关闭“创建函数时校验函数体”，
 -- 函数首次被调用时仍会完整校验，不影响运行期正确性。
 set check_function_bodies = off;
---  生成时间：2026-11-01 02:09:44
+--  生成时间：2026-11-01 02:33:25
 
 --  【脚本目录】（在 SQL Editor 里搜索下面的标题文字可快速定位）
 --   1. 扩展（pgcrypto）
@@ -3015,6 +3015,7 @@ declare
   v_repr     uuid;
   v_members  jsonb;
   v_draw_id  uuid;
+  v_in_progress boolean := false;
 begin
   select * into v_b from public.boundaries where id = p_boundary_id;
   if v_b.id is null then
@@ -3032,12 +3033,14 @@ begin
   if v_b.start_date is null or v_b.end_date is null then
     raise exception '该周周期缺少起止日期，请先在「设置 → 周期定义」补全';
   end if;
+  -- V2.1.2：允许汇总「进行中」的周，统计范围截至今天（结束日期在未来的周）
+  v_in_progress := v_b.end_date > public.bj_today();
   v_sd := v_b.start_date;
-  v_ed := v_b.end_date + 1;                       -- 取不含上界
+  v_ed := least(v_b.end_date, public.bj_today()) + 1;   -- 取不含上界
   v_start := v_sd::timestamp at time zone 'Asia/Shanghai';
   v_end   := v_ed::timestamp at time zone 'Asia/Shanghai';
   v_week_key := v_b.period_key;
-  v_month_key := coalesce(public.period_key_of('month', v_b.end_date), public.current_month_key());
+  v_month_key := coalesce(public.period_key_of('month', least(v_b.end_date, public.bj_today())), public.current_month_key());
 
   select coalesce((public.cfg()->>'week_reward_top_groups')::int, 3),
          coalesce((public.cfg()->>'week_penalty_bottom_groups')::int, 3)
@@ -3140,6 +3143,7 @@ begin
   v_summary := v_summary || jsonb_build_object(
     'effects_done', true,
     'snapshot_only', true,
+    'in_progress', v_in_progress,
     'reward_chances_added', 0,
     'penalty_draws', 0,
     'reward_group_chances', 0,
@@ -5913,9 +5917,17 @@ begin
   perform public.require_role(array['super_admin','admin','executive'], '只有管理员、班主任或执行小组可以手动汇总');
 
   if p_boundary_id is null then
+    -- V2.1.2：优先「本周」（今天落在起止日期之间），否则取最近一个已结束的周
     select * into v_b from public.boundaries
-     where type = 'week' and boundary_at <= now()
-     order by boundary_at desc limit 1;
+     where type = 'week' and start_date is not null and end_date is not null
+       and start_date <= public.bj_today() and end_date >= public.bj_today()
+     order by start_date desc limit 1;
+    if v_b.id is null then
+      select * into v_b from public.boundaries
+       where type = 'week' and start_date is not null and end_date is not null
+         and end_date < public.bj_today()
+       order by start_date desc limit 1;
+    end if;
   else
     select * into v_b from public.boundaries where id = p_boundary_id;
   end if;
@@ -5926,8 +5938,8 @@ begin
   if v_b.type <> 'week' then
     raise exception '该分隔点不是周分隔点';
   end if;
-  if v_b.boundary_at > now() then
-    raise exception '该周尚未结束，不能汇总';
+  if v_b.start_date is not null and v_b.start_date > public.bj_today() then
+    raise exception '该周尚未开始，不能汇总';
   end if;
 
   -- 周分隔点关闭的是「上一周」，周期键必须按关闭的那一周推导（不能用分隔点自身所在周）
@@ -5950,10 +5962,12 @@ begin
   v_draws := coalesce((v_res->>'penalty_group_chances')::int, 0);
 
   perform public.write_audit('admin_run_weekly_summary', 'boundary', v_b.id::text,
-    jsonb_build_object('week_key', v_key, 'reward_chances', v_added, 'penalty_draws', v_draws));
+    jsonb_build_object('week_key', v_key, 'reward_chances', v_added, 'penalty_draws', v_draws,
+                       'in_progress', (v_b.end_date is not null and v_b.end_date >= public.bj_today())));
 
   return jsonb_build_object(
     'week_key', v_key, 'boundary_id', v_b.id,
+    'in_progress', (v_b.end_date is not null and v_b.end_date >= public.bj_today()),
     'reward_chances', v_added, 'penalty_draws', v_draws, 'summary', v_res);
 end;
 $$;

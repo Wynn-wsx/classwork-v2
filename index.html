@@ -423,7 +423,7 @@ table.data.my-list{min-width:0}
 const SUPABASE_URL = 'https://rdwbtyecityxopofjokj.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJkd2J0eWVjaXR5eG9wb2Zqb2tqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI4NDg0MzgsImV4cCI6MjEwODQyNDQzOH0.s8zcarl9bhJn1_yOtchGr1gWYCBhtM8-puiGmChFk0s';
 const EMAIL_DOMAIN = '@banji.local';
-const APP_VERSION = '2.1.1';
+const APP_VERSION = '2.1.2';
 
 /* 正式版 V2.0.0：默认连接上述 Supabase 项目；本地调试时可在页面加载前注入
    window.__SB_OVERRIDE__ = { url, key } 临时指向其他项目 */
@@ -860,6 +860,7 @@ function rulesByType(type){
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function fmtDate(d){ const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), dd=String(d.getDate()).padStart(2,'0'); return `${y}-${m}-${dd}`; }
 /* 兼容字符串 / Date / ISO：用于汇总里的时间字段显示 */
+function todayYmd(){ const d=new Date(Date.now()+8*3600*1000); return d.toISOString().slice(0,10); }
 function fmtDay(v){
   if(!v) return '';
   if(v instanceof Date) return fmtDate(v);
@@ -3472,14 +3473,14 @@ async function renderWeekSummaries(){
   const periodsR=await rpc('list_summary_periods',{ p_type:'week', p_limit:60 });
   const pItems=(periodsR.code===0&&periodsR.data&&periodsR.data.items)||[];
   const adminBar = isTeacher() ? `<div class="card"><div class="toolbar">
-      <button class="btn btn-primary btn-sm" onclick="runWeeklySummary()">立即汇总上周</button>
+      <button class="btn btn-primary btn-sm" onclick="runWeeklySummary()">${(DB.boundaries||[]).some(b=>b.type==='week'&&b.start_date&&b.end_date&&String(b.start_date)<=todayYmd()&&String(b.end_date)>=todayYmd())?'汇总本周（截至今天）':'立即汇总上周'}</button>
       <span class="lbl">查看周期</span>
       <select class="field" id="sumWeekSel">
         ${pItems.filter(x=>x.has_summary).concat(pItems.filter(x=>!x.has_summary).slice(0,2)).map(x=>`<option value="${esc(x.period_key)}">${esc(periodRangeText(x,'week'))}${x.has_summary?'':'（尚无汇总）'}</option>`).join('')}
       </select>
       <button class="btn btn-sm" onclick="viewPeriodSummary('week')">查看该周期</button>
       <button class="btn btn-sm btn-primary" onclick="resumPeriod('week')">重新汇总该周期</button>
-      <span class="dim small">可选任意过去周期查看/重算；同一周期多次汇总以最新一次为准（覆盖旧结果）</span>
+      <span class="dim small">可选任意周期查看/重算；本周尚未结束时也能汇总（统计截至今天），同一周期多次汇总以最新一次为准（覆盖旧结果）</span>
     </div></div>` : `<div class="card"><div class="toolbar">
       <span class="lbl">查看周期</span>
       <select class="field" id="sumWeekSel">
@@ -3496,6 +3497,7 @@ async function renderWeekSummaries(){
       <div class="toolbar"><h3 style="margin:0">${esc(fmtDay(w.range_start))} ~ ${esc(fmtDay(w.range_end))}</h3>
         <span class="dim small">周期 ${esc(w.period_key||'')}</span>
         <span class="pill">快照${s.effects_done?'·已结算':'·仅快照'}</span>
+        ${s.in_progress?`<span class="badge-status badge-warn" title="该周尚未结束，统计范围截至汇总当天；再次汇总会覆盖前一次结果">进行中汇总</span>`:''}
         ${isTeacher()?`<button class="btn btn-sm btn-ghost" onclick="runWeeklySummary('${esc(w.boundary_id||'')}')">重新汇总</button>`:''}</div>
       ${student?`
         <div class="kv"><span>我的周积分</span><b>${me?(esc(String(me.total))+' 分 / 第 '+esc(String(me.rank))+' 名'):'无记录'}</b></div>`
@@ -3517,7 +3519,7 @@ async function renderWeekSummaries(){
         <div class="dim small">奖励小组：${(s.reward_groups||[]).map(g=>g.group_name||g).join('、')||'无'}　｜　惩罚小组：${(s.penalty_groups||[]).map(g=>g.group_name||g).join('、')||'无'}</div>
         <div class="dim small">建议奖励小组：${esc(((s.reward_groups||[]).map(g=>g.group_name).join('、'))||'无')}　｜　建议惩罚小组：${esc(((s.penalty_groups||[]).map(g=>g.group_name).join('、'))||'无')}　｜　抽奖请到「奖惩抽选 → 小组（集体）」由执行小组及以上手动进行</div>`}
       </div>`;
-  }).join('') : `<div class="card"><div class="empty">暂无周汇总。由管理员点「立即汇总上周」生成（系统不自动汇总）。</div></div>`);
+  }).join('') : `<div class="card"><div class="empty">暂无周汇总。由管理员点「汇总本周 / 立即汇总上周」生成（系统不自动汇总）。</div></div>`);
 }
 function monthPeriodLabel(key){
   const b=(DB.boundaries||[]).find(x=>String(x.type||'')==='month'&&String(x.period_key||'')===String(key||''));
