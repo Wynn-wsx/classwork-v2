@@ -117,79 +117,40 @@ grant execute on function public.get_period_state() to authenticated;
 -- ------------------------------------------------------------
 -- 内部：按配置预生成周/月分隔点（幂等，已存在则跳过）
 -- ------------------------------------------------------------
+-- ------------------------------------------------------------
+-- V2.0.19：不再按规则批量铺底；只保证「当前周」与「当前月（进行中）」各一条作为起点
+-- ------------------------------------------------------------
 create or replace function public.ensure_boundaries(
   p_months_back    int default 6,
   p_months_forward int default 12
 ) returns int
 language plpgsql security definer set search_path = public, extensions as $$
 declare
-  v_local   timestamp := (now() at time zone 'Asia/Shanghai');
-  v_week    jsonb;
-  v_month   jsonb;
-  v_dow     int;
-  v_hour    int;
-  v_minute  int;
-  v_dom     int;
-  v_cursor  timestamp;
-  v_cand    timestamp;
-  v_end     timestamp;
-  v_start   timestamp;
-  v_count   int := 0;
+  v_today date := public.bj_today();
+  v_ws    date := public.bj_week_start(public.bj_today());
+  v_n     int := 0;
 begin
-  -- V2.0.6：可关闭「按规则自动生成未来分隔点」，关闭后只能手动增删分隔点
-  if not coalesce((select auto_boundaries from public.app_config where id = 1), true) then
-    return 0;
-  end if;
-  select coalesce(week_rule, '{"dow":1,"hour":0,"minute":0}'::jsonb),
-         coalesce(month_rule, '{"dom":1,"hour":0,"minute":0}'::jsonb)
-    into v_week, v_month
-    from public.app_config where id = 1;
-  if v_week is null then
-    v_week := '{"dow":1,"hour":0,"minute":0}'::jsonb;
-  end if;
-  if v_month is null then
-    v_month := '{"dom":1,"hour":0,"minute":0}'::jsonb;
+  if not exists (select 1 from public.boundaries where type = 'week' and start_date = v_ws) then
+    insert into public.boundaries (type, period_key, start_date, end_date, rule_weeks, boundary_at, label, is_manual, settled)
+    values ('week', to_char(v_ws, 'YYYY-MM-DD'), v_ws, v_ws + 6, 1,
+            ((v_ws + 7)::timestamp at time zone 'Asia/Shanghai'),
+            to_char(v_ws, 'YYYY-MM-DD') || ' ~ ' || to_char(v_ws + 6, 'YYYY-MM-DD'), false,
+            ((v_ws + 7)::timestamp at time zone 'Asia/Shanghai') <= now() - interval '1 day')
+    on conflict do nothing;
+    v_n := v_n + 1;
   end if;
 
-  v_start := date_trunc('month', v_local) - make_interval(months => greatest(p_months_back, 0));
-  v_end   := v_local + make_interval(months => greatest(p_months_forward, 1));
+  if not exists (select 1 from public.boundaries b
+                  where b.type = 'month' and b.start_date <= v_today
+                    and coalesce(b.end_date, '9999-12-31'::date) >= v_today) then
+    insert into public.boundaries (type, period_key, start_date, end_date, rule_weeks, boundary_at, label, is_manual, settled)
+    values ('month', to_char(v_ws, 'YYYY-MM-DD'), v_ws, null, 1, null,
+            to_char(v_ws, 'YYYY-MM-DD') || ' ~ （进行中）', false, false)
+    on conflict do nothing;
+    v_n := v_n + 1;
+  end if;
 
-  -- 月分隔点
-  v_dom    := coalesce((v_month->>'dom')::int, 1);
-  v_hour   := coalesce((v_month->>'hour')::int, 0);
-  v_minute := coalesce((v_month->>'minute')::int, 0);
-  v_cursor := v_start;
-  while v_cursor <= v_end loop
-    v_cand := v_cursor + make_interval(days => v_dom - 1, hours => v_hour, mins => v_minute);
-    -- 历史分隔点（1 天以前）直接标记为已结算，避免首次配置时 cron 把过去半年的周期全部补结算一遍
-    insert into public.boundaries (type, period_key, boundary_at, label, is_manual, settled)
-    values ('month', to_char(v_cand, 'YYYY-MM'), v_cand at time zone 'Asia/Shanghai',
-            to_char(v_cand, 'YYYY"年"MM"月"'), false,
-            (v_cand at time zone 'Asia/Shanghai') <= now() - interval '1 day')
-    on conflict (type, boundary_at) do nothing;
-    get diagnostics v_count = row_count;
-    v_cursor := v_cursor + interval '1 month';
-  end loop;
-
-  -- 周分隔点（按配置星期几逐日扫描）
-  v_dow    := coalesce((v_week->>'dow')::int, 1);
-  v_hour   := coalesce((v_week->>'hour')::int, 0);
-  v_minute := coalesce((v_week->>'minute')::int, 0);
-  v_cursor := date_trunc('day', v_start) - interval '8 days';
-  while v_cursor <= v_end loop
-    if extract(isodow from v_cursor)::int = v_dow then
-      v_cand := v_cursor + make_interval(hours => v_hour, mins => v_minute);
-      insert into public.boundaries (type, period_key, boundary_at, label, is_manual, settled)
-      values ('week', to_char(v_cand, 'IYYY-IW'), v_cand at time zone 'Asia/Shanghai',
-              to_char(v_cand, 'YYYY-MM-DD') || ' 周分隔点', false,
-              (v_cand at time zone 'Asia/Shanghai') <= now() - interval '1 day')
-      on conflict (type, boundary_at) do nothing;
-      get diagnostics v_count = row_count;
-    end if;
-    v_cursor := v_cursor + interval '1 day';
-  end loop;
-
-  return v_count;
+  return v_n;
 end;
 $$;
 revoke all on function public.ensure_boundaries(int, int) from public, anon, authenticated;

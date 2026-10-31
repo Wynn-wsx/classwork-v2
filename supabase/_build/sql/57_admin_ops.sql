@@ -84,8 +84,9 @@ begin
     raise exception '该周尚未结束，不能汇总';
   end if;
 
+  -- 周分隔点关闭的是「上一周」，周期键必须按关闭的那一周推导（不能用分隔点自身所在周）
   v_key   := v_b.period_key;
-  v_month := to_char((v_b.boundary_at - interval '1 second') at time zone 'Asia/Shanghai', 'YYYY-MM');
+  v_month := coalesce(public.period_key_of('month', v_b.end_date), public.current_month_key());
 
   -- 覆盖：清掉本周期已有结果
   delete from public.weekly_summaries where boundary_id = v_b.id;
@@ -144,6 +145,7 @@ begin
     raise exception '该月尚未结束，不能汇总';
   end if;
 
+  -- 月分隔点关闭的是「上一个月」，周期键按被结算的月份推导（settlements.period_key 用的是这个）
   v_key := v_b.period_key;
 
   -- 覆盖：旧结算记录标记为已回滚（保留审计痕迹），清掉该月已生成的次数与自动抽选

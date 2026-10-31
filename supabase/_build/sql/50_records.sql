@@ -6,17 +6,22 @@
 -- ------------------------------------------------------------
 -- 5.1 内部：规则周期上限校验（add/update 共用，不对前端授权）
 --     周期边界 = 最近一个已到点的周分隔点 / 自定义更新点 / 月分隔点
---     统计口径：该规则在本周期内「登记时间」落在区间的有效记录
+--     统计口径：**按被登记的学生**统计——同一学生在同一规则、同一周期内
+--               最多登记 limit_value 次 / limit_value 分（不是全班合计）
 -- ------------------------------------------------------------
 create or replace function public.check_rule_limit(
-  p_rule_id  uuid,
-  p_points   numeric,
-  p_exclude  uuid default null
+  p_rule_id    uuid,
+  p_points     numeric,
+  p_student_id uuid,
+  p_date       date,
+  p_exclude    uuid default null
 ) returns void
 language plpgsql security definer set search_path = public, extensions as $$
 declare
   r        public.rules;
-  v_start  timestamptz;
+  v_w      public.boundaries;
+  v_mult   int;
+  v_limit  numeric;
   v_used   numeric;
   v_cnt    int;
   v_delta  numeric;
@@ -31,13 +36,17 @@ begin
   if r.limit_type = 'none' or r.limit_value is null then
     return;
   end if;
+  if p_student_id is null then
+    raise exception '规则上限需要指定被登记的学生';
+  end if;
 
-  select coalesce(max(b.boundary_at), now() - interval '30 days')
-    into v_start
-    from public.boundaries b
-   where b.boundary_at <= now()
-     and b.type in ('week', 'rule_update', 'month');
-
+  -- 周期 = 登记日期所在「周周期」；额度 = 单周期上限 × 规则计分周数
+  v_w := public.period_of_date('week', coalesce(p_date, public.bj_today()));
+  if v_w.id is null then
+    raise exception '登记日期不在任何周周期内，请先在「设置 → 周期定义」补齐周期';
+  end if;
+  v_mult  := greatest(coalesce(v_w.rule_weeks, 1), 1);
+  v_limit := r.limit_value * v_mult;
   v_delta := case when r.score_type = '扣分' then abs(p_points) else p_points end;
 
   select count(*),
@@ -45,22 +54,27 @@ begin
     into v_cnt, v_used
     from public.records rc
    where rc.rule_id = p_rule_id
+     and rc.student_id = p_student_id
      and rc.status = '正常'
-     and rc.created_at >= v_start
+     and rc.record_date >= to_char(v_w.start_date, 'YYYY-MM-DD')
+     and rc.record_date <= to_char(v_w.end_date, 'YYYY-MM-DD')
      and (p_exclude is null or rc.id <> p_exclude);
 
   if r.limit_type = 'count' then
-    if v_cnt + 1 > r.limit_value then
-      raise exception '规则「%」本周期最多登记 % 次，已达上限，不能再登记', r.reason, r.limit_value::int;
+    if v_cnt + 1 > v_limit then
+      raise exception '规则「%」每位学生本周期最多登记 % 次（该生已登记 % 次%s），已达上限',
+        r.reason, v_limit::int, v_cnt,
+        case when v_mult > 1 then '；本周按 ' || v_mult || ' 个规则计分周' else '' end;
     end if;
   else
-    if v_used + v_delta > r.limit_value then
-      raise exception '规则「%」本周期分值上限 %，已用 %，本次 % 将超限', r.reason, r.limit_value, v_used, v_delta;
+    if v_used + v_delta > v_limit then
+      raise exception '规则「%」每位学生本周期分值上限 %（该生已用 %，本次 %）%', r.reason, v_limit, v_used, v_delta,
+        case when v_mult > 1 then '；本周按 ' || v_mult || ' 个规则计分周' else '' end;
     end if;
   end if;
 end;
 $$;
-revoke all on function public.check_rule_limit(uuid, numeric, uuid) from public, anon, authenticated;
+revoke all on function public.check_rule_limit(uuid, numeric, uuid, date, uuid) from public, anon, authenticated;
 
 -- ------------------------------------------------------------
 -- 5.2 新增记录
@@ -77,8 +91,10 @@ create or replace function public.add_record(
 ) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare
-  v_role text := public.caller_role();
-  v_rec  public.records;
+  v_role  text := public.caller_role();
+  v_rec   public.records;
+  v_week  public.boundaries;
+  v_month public.boundaries;
 begin
   -- 监督委员（学生，当周临时授权）可以登记积分；其余角色按原权限
   if v_role not in ('system','super_admin','admin','executive','group_recorder') then
@@ -120,7 +136,13 @@ begin
     raise exception '该登记月已冻结，不能新增记录（如需纠错请让管理员处理）';
   end if;
 
-  perform public.check_rule_limit(p_rule_id, p_points, null);
+  v_week  := public.period_of_date('week', p_record_date);
+  v_month := public.period_of_date('month', p_record_date);
+  if v_week.id is null or v_month.id is null then
+    raise exception '该日期不在任何周期内，请先在「设置 → 周期定义」补齐周期';
+  end if;
+
+  perform public.check_rule_limit(p_rule_id, p_points, p_student_id, p_record_date, null);
 
   insert into public.records (
     student_id, score_type, category, reason, points, recorder_id, recorder_name,
@@ -129,7 +151,7 @@ begin
     p_student_id, p_score_type, coalesce(p_category,''), coalesce(p_reason,''), p_points, auth.uid(),
     (select p.name from public.profiles p where p.id = auth.uid()),
     p_record_date::text, '正常', p_evidence, p_rule_id,
-    now() + interval '2 seconds', to_char(p_record_date, 'YYYY-MM')
+    now() + interval '2 seconds', v_month.period_key
   ) returning * into v_rec;
 
   perform public.write_audit('add_record', 'record', v_rec.id::text,
@@ -154,9 +176,11 @@ create or replace function public.update_record(
 language plpgsql security definer set search_path = public, extensions as $$
 declare
   v_role text := public.caller_role();
-  v_old  public.records;
-  v_new  public.records;
-  v_date date;
+  v_old   public.records;
+  v_new   public.records;
+  v_date  date;
+  v_week  public.boundaries;
+  v_month public.boundaries;
 begin
   perform public.require_role(array['super_admin','admin','executive','group_recorder'], '没有权限修改积分记录');
   if public.is_maintenance() then
@@ -190,14 +214,20 @@ begin
     raise exception '目标登记月已冻结，不能改到该月';
   end if;
 
-  perform public.check_rule_limit(v_old.rule_id, p_points, v_old.id);
+  v_week  := public.period_of_date('week', v_date);
+  v_month := public.period_of_date('month', v_date);
+  if v_week.id is null or v_month.id is null then
+    raise exception '目标日期不在任何周期内，请先在「设置 → 周期定义」补齐周期';
+  end if;
+
+  perform public.check_rule_limit(v_old.rule_id, p_points, v_old.student_id, v_date, v_old.id);
 
   update public.records
      set reason      = coalesce(p_reason, reason),
          points      = p_points,
          evidence    = coalesce(p_evidence, evidence),
          record_date = v_date::text,
-         period_key  = to_char(v_date, 'YYYY-MM'),
+         period_key  = v_month.period_key,
          modified_by = auth.uid(),
          modified_by_name = (select p.name from public.profiles p where p.id = auth.uid()),
          modified_at = now(),

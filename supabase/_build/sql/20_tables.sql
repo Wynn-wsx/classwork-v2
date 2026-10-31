@@ -166,6 +166,16 @@ create table if not exists public.boundaries (
   created_by  uuid,
   unique (type, boundary_at)
 );
+-- V2.0.19：周/月周期改为「起止日期」语义（period_key = 起始日期，稳定不变）
+alter table public.boundaries add column if not exists start_date date;
+alter table public.boundaries add column if not exists end_date date;
+alter table public.boundaries add column if not exists rule_weeks int not null default 1;
+alter table public.boundaries add column if not exists deprecated boolean not null default false;
+alter table public.boundaries alter column boundary_at drop not null;
+create unique index if not exists boundaries_type_start_uniq on public.boundaries(type, start_date) where start_date is not null;
+alter table public.boundaries drop constraint if exists boundaries_rule_weeks_check;
+alter table public.boundaries add constraint boundaries_rule_weeks_check check (rule_weeks between 1 and 4);
+
 create index if not exists boundaries_type_at_idx on public.boundaries(type, boundary_at desc);
 create index if not exists boundaries_at_idx on public.boundaries(boundary_at);
 
@@ -251,14 +261,17 @@ create table if not exists public.lottery_draws (
   used_by          uuid,
   used_at          timestamptz,
   related_record_id uuid references public.records(id) on delete set null,
-  note             text
+  note             text,
+  source_week_key  text not null default ''
 );
+alter table public.lottery_draws add column if not exists source_week_key text not null default '';
 alter table public.lottery_draws drop constraint if exists lottery_draws_pool_type_check;
 alter table public.lottery_draws add constraint lottery_draws_pool_type_check
   check (pool_type in ('reward','penalty'));
 alter table public.lottery_draws drop constraint if exists lottery_draws_source_check;
 alter table public.lottery_draws add constraint lottery_draws_source_check
-  check (source in ('manual','auto','weekly_group','weekly_group_reward','weekly_group_penalty','monthly_group_penalty'));
+  check (source in ('manual','auto','weekly_group','weekly_group_reward','weekly_group_penalty',
+                    'monthly_group_penalty','weekly_group_manual_reward','weekly_group_manual_penalty'));
 alter table public.lottery_draws drop constraint if exists lottery_draws_status_check;
 alter table public.lottery_draws add constraint lottery_draws_status_check
   check (status in ('unused','used','expired','void','posted'));

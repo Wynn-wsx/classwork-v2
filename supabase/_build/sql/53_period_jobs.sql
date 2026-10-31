@@ -51,16 +51,15 @@ begin
     return v_exist;
   end if;
 
-  v_end := v_b.boundary_at;
-  v_start := coalesce(
-    (select max(b.boundary_at) from public.boundaries b
-      where b.type = 'week' and b.boundary_at < v_end),
-    v_end - interval '7 days');
-  v_sd := (v_start at time zone 'Asia/Shanghai')::date;
-  v_ed := (v_end at time zone 'Asia/Shanghai')::date;
+  if v_b.start_date is null or v_b.end_date is null then
+    raise exception '该周周期缺少起止日期，请先在「设置 → 周期定义」补全';
+  end if;
+  v_sd := v_b.start_date;
+  v_ed := v_b.end_date + 1;                       -- 取不含上界
+  v_start := v_sd::timestamp at time zone 'Asia/Shanghai';
+  v_end   := v_ed::timestamp at time zone 'Asia/Shanghai';
   v_week_key := v_b.period_key;
-  -- 本周（结算覆盖的那段）所属自然月 → 奖励次数入该月
-  v_month_key := to_char((v_end - interval '1 second') at time zone 'Asia/Shanghai', 'YYYY-MM');
+  v_month_key := coalesce(public.period_key_of('month', v_b.end_date), public.current_month_key());
 
   select coalesce((public.cfg()->>'week_reward_top_groups')::int, 3),
          coalesce((public.cfg()->>'week_penalty_bottom_groups')::int, 3)
@@ -139,7 +138,7 @@ begin
     'type', 'week',
     'week_key', v_week_key,
     'range_start', v_start,
-    'range_end', v_end,
+    'range_end', (v_ed - 1),
     'groups', v_groups,
     'individuals', v_individuals,
     'reward_groups', (select coalesce(jsonb_agg(g), '[]'::jsonb)
@@ -155,71 +154,37 @@ begin
     'generated_at', now()
   );
   insert into public.weekly_summaries (period_key, boundary_id, range_start, range_end, summary)
-  values (v_week_key, p_boundary_id, v_start, v_end, v_summary);
+  values (v_week_key, p_boundary_id, v_start, ((v_ed - 1)::timestamp at time zone 'Asia/Shanghai'), v_summary);
 
-  -- ① 前 N 组：每组获得 1 次集体奖励抽选机会（按 pos 取，避免并列把名额放大）
-  insert into public.lottery_group_chances
-    (group_name, period_key, pool_type, chance_type, source_week_key, amount, note)
-  select g->>'group_name', v_month_key, 'reward', 'weekly_group_reward', v_week_key, 1,
-         format('%s 周小组积分第 %s 名', v_week_key, g->>'pos')
-    from jsonb_array_elements(v_groups) g
-   where (g->>'pos')::int <= v_top
-  on conflict (group_name, period_key, chance_type, source_week_key) do nothing;
-  get diagnostics v_reward_chances = row_count;
-
-  -- 通知前 N 组全体成员
-  for v_p in
-    select p.id as profile_id, s.group_name, (g->>'pos') as pos
-      from jsonb_array_elements(v_groups) g
-      join public.students s on s.group_name = g->>'group_name'
-      join public.profiles p on p.student_id = s.id
-     where (g->>'pos')::int <= v_top and p.status = 'active'
-  loop
-    perform public.notify(v_p.profile_id, '本周小组集体奖励抽选机会',
-      format('你所在的「%s」小组本周积分第 %s 名，获得 1 次集体奖励抽选机会，由小组记录员代表全组抽选。',
-             v_p.group_name, v_p.pos),
-      'lottery', null, null);
-  end loop;
-
-  -- ② 后 N 组：每组获得 1 次小组惩罚抽选机会（代表抽选，全组共担执行）
-  insert into public.lottery_group_chances
-    (group_name, period_key, pool_type, chance_type, source_week_key, amount, note)
-  select g->>'group_name', v_month_key, 'penalty', 'weekly_group_penalty', v_week_key, 1,
-         format('%s 周小组积分第 %s 名', v_week_key, g->>'pos')
-    from jsonb_array_elements(v_groups) g
-   where v_group_cnt >= v_top + v_bottom
-     and (g->>'pos')::int > greatest(v_top, v_group_cnt - v_bottom)
-  on conflict (group_name, period_key, chance_type, source_week_key) do nothing;
-  get diagnostics v_penalty_chances = row_count;
-
-  -- 通知后 N 组全体成员
-  for v_p in
-    select p.id as profile_id, s.group_name, (g->>'pos') as pos
-      from jsonb_array_elements(v_groups) g
-      join public.students s on s.group_name = g->>'group_name'
-      join public.profiles p on p.student_id = s.id
-     where v_group_cnt >= v_top + v_bottom
-       and (g->>'pos')::int > greatest(v_top, v_group_cnt - v_bottom)
-       and p.status = 'active'
-  loop
-    perform public.notify(v_p.profile_id, '本周小组惩罚抽选机会',
-      format('你所在的「%s」小组本周积分第 %s 名，需进行 1 次小组惩罚抽选，由小组记录员代表全组抽选，结果全组共担。',
-             v_p.group_name, v_p.pos),
-      'lottery', null, null);
-  end loop;
-
+  -- V2.0.14：周结算只写汇总快照，不再发放抽选次数、也不再自动抽惩罚。
+  --   小组抽奖改为人工：由执行小组及以上在「奖惩抽选 → 小组」里选择小组后抽取（每组每池每周限一次）。
+  --   summary 中的 reward_groups / penalty_groups 仅作为「建议名单」展示。
   v_summary := v_summary || jsonb_build_object(
     'effects_done', true,
+    'snapshot_only', true,
     'reward_chances_added', 0,
-    'penalty_draws', v_penalty_draws,
-    'reward_group_chances', v_reward_chances,
-    'penalty_group_chances', v_penalty_chances);
+    'penalty_draws', 0,
+    'reward_group_chances', 0,
+    'penalty_group_chances', 0);
   update public.weekly_summaries set summary = v_summary where boundary_id = p_boundary_id;
   update public.boundaries set settled = true where id = p_boundary_id;
+
+  -- 通知执行小组及以上：周汇总已生成，可开始人工小组抽奖
+  perform public.notify_audience('executive_plus',
+    format('%s 周汇总已生成', v_week_key),
+    format('奖励建议：%s；惩罚建议：%s。请到「奖惩抽选 → 小组」选择小组抽奖（每组每池每周限一次；奖励全组每人一份，惩罚全组共担）。',
+      coalesce((select string_agg(g->>'group_name', '、')
+                  from jsonb_array_elements(v_groups) g
+                 where (g->>'pos')::int <= v_top), '无'),
+      coalesce((select string_agg(g->>'group_name', '、')
+                  from jsonb_array_elements(v_groups) g
+                 where v_group_cnt >= v_top + v_bottom
+                   and (g->>'pos')::int > greatest(v_top, v_group_cnt - v_bottom)), '无')),
+    'period', 'weekly_summary',
+    (select id from public.weekly_summaries where boundary_id = p_boundary_id limit 1));
+
   perform public.write_audit('weekly_snapshot', 'boundary', p_boundary_id::text,
-    jsonb_build_object('week_key', v_week_key,
-      'reward_group_chances', v_reward_chances,
-      'penalty_group_chances', v_penalty_chances));
+    jsonb_build_object('week_key', v_week_key, 'snapshot_only', true));
   return v_summary;
 end;
 $$;
@@ -257,6 +222,7 @@ declare
   v_reward_rows jsonb;
   v_penalty_rows jsonb;
   v_auto       int;
+  v_rec_cnt    int := 0;
 begin
   select * into v_b from public.boundaries where id = p_boundary_id;
   if v_b.id is null then
@@ -272,14 +238,17 @@ begin
     return v_st.summary;
   end if;
 
-  v_end := v_b.boundary_at;
-  v_start := coalesce(
-    (select max(b.boundary_at) from public.boundaries b
-      where b.type = 'month' and b.boundary_at < v_end),
-    v_end - interval '1 month');
-  v_sd := (v_start at time zone 'Asia/Shanghai')::date;
-  v_ed := (v_end at time zone 'Asia/Shanghai')::date;
-  v_month_key := to_char((v_end - interval '1 second') at time zone 'Asia/Shanghai', 'YYYY-MM');
+  if v_b.start_date is null then
+    raise exception '该月周期缺少起始日期，请先在「设置 → 周期定义」补全';
+  end if;
+  if v_b.end_date is null then
+    raise exception '该月周期尚未结束（未填结束日期），不能结算';
+  end if;
+  v_sd := v_b.start_date;
+  v_ed := v_b.end_date + 1;                       -- 取不含上界
+  v_start := v_sd::timestamp at time zone 'Asia/Shanghai';
+  v_end   := v_ed::timestamp at time zone 'Asia/Shanghai';
+  v_month_key := v_b.period_key;
 
   -- 维护窗口（设计：月结算期间全站只读 30 分钟）
   update public.app_config
@@ -296,6 +265,32 @@ begin
 
   insert into public.settlements (period_key, boundary_id, started_at, status)
   values (v_month_key, p_boundary_id, now(), 'running');
+
+  -- V2.0.14：当月没有任何有效记录时只写空结算，不产生任何次数/抽选/第二类名单
+  select count(*) into v_rec_cnt
+    from public.records
+   where status = '正常'
+     and record_date >= to_char(v_sd, 'YYYY-MM-DD')
+     and record_date <  to_char(v_ed, 'YYYY-MM-DD');
+  if v_rec_cnt = 0 then
+    v_summary := jsonb_build_object(
+      'type', 'month', 'month_key', v_month_key,
+      'range_start', v_start, 'range_end', (v_ed - 1),
+      'groups', '[]'::jsonb, 'individuals', '[]'::jsonb,
+      'second_class', '[]'::jsonb, 'second_class_count', 0,
+      'reward', jsonb_build_object('rows', '[]'::jsonb, 'forfeit', '[]'::jsonb),
+      'penalty', jsonb_build_object('rows', '[]'::jsonb),
+      'auto_draw_count', 0, 'cards_expired', 0,
+      'empty_month', true, 'generated_at', now());
+    update public.settlements
+       set status = 'done', finished_at = now(), summary = v_summary,
+           second_class = '[]'::jsonb, auto_draw_count = 0
+     where boundary_id = p_boundary_id and status <> 'rolled_back';
+    update public.boundaries set settled = true where id = p_boundary_id;
+    perform public.write_audit('monthly_settle_empty', 'boundary', p_boundary_id::text,
+      jsonb_build_object('month_key', v_month_key, 'records', 0));
+    return v_summary;
+  end if;
 
   -- 个人月积分（加分 / 扣分 / 净分）
   select coalesce(jsonb_agg(jsonb_build_object(
@@ -396,19 +391,40 @@ begin
     v_second_ids := '{}';
   end if;
 
-  -- 奖励次数 = max(floor(月加分/阈值), 月加分前 N 名则 1)，max 去重后写成一条
+  -- 奖励次数（V2.0.16 口径，用户确认）：
+  --   (a) 月净积分排名前 v_top_n（默认 15）名，不论净分正负，每人 1 次 → chance_type = monthly_top15
+  --   (b) 净分正分部分每满 v_reward_thr（默认 10）分追加 1 次，不足不计 → chance_type = monthly_points
+  --   并列同分同名次、一并计入
+  insert into public.lottery_chances (student_id, period_key, pool_type, chance_type, amount, source_week_key)
+  select q.student_id, v_month_key, 'reward', 'monthly_top15', 1, ''
+    from (
+      select s.id as student_id,
+             rank() over (order by coalesce(x.add_total,0) - coalesce(x.ded_total,0) desc) as rk
+        from public.students s
+        left join (
+          select rec.student_id,
+                 sum(case when rec.points > 0 then rec.points else 0 end) as add_total,
+                 sum(case when rec.points < 0 then abs(rec.points) else 0 end) as ded_total
+            from public.records rec
+           where rec.status = '正常'
+             and rec.record_date >= to_char(v_sd, 'YYYY-MM-DD')
+             and rec.record_date <  to_char(v_ed, 'YYYY-MM-DD')
+           group by rec.student_id
+        ) x on x.student_id = s.id
+    ) q
+   where q.rk <= v_top_n
+  on conflict (student_id, period_key, chance_type, source_week_key) do nothing;
+
   insert into public.lottery_chances (student_id, period_key, pool_type, chance_type, amount, source_week_key)
   select q.student_id, v_month_key, 'reward', 'monthly_points', q.amount, ''
     from (
       select s.id as student_id,
-             greatest(
-               floor(coalesce(x.add_total,0) / v_reward_thr)::int,
-               case when rank() over (order by coalesce(x.add_total,0) desc) <= v_top_n then 1 else 0 end
-             ) as amount
+             floor(greatest(coalesce(x.add_total,0) - coalesce(x.ded_total,0), 0) / v_reward_thr)::int as amount
         from public.students s
         left join (
           select rec.student_id,
-                 sum(case when rec.points > 0 then rec.points else 0 end) as add_total
+                 sum(case when rec.points > 0 then rec.points else 0 end) as add_total,
+                 sum(case when rec.points < 0 then abs(rec.points) else 0 end) as ded_total
             from public.records rec
            where rec.status = '正常'
              and rec.record_date >= to_char(v_sd, 'YYYY-MM-DD')
@@ -419,39 +435,41 @@ begin
    where q.amount > 0
   on conflict (student_id, period_key, chance_type, source_week_key) do nothing;
 
-  -- 惩罚次数（V2.0.10 规则）：
-  --   普通学生 = floor(月扣分/阈值)
-  --   按排名惩罚（后 N 名）= max(floor(月扣分/阈值), 1) 作为基础次数；
-  --     若该生本月可通过积分获得奖励（加分/阈值 ≥ 1，或月加分前 N 名兜底 1 次），
-  --     则用 1 次奖励抵消 1 次惩罚（基础次数 -1，最低 0）；
-  --   基础次数为 0 时不再额外发放（即「不能通过积分结算惩罚」才记这一次）。
-  --   次数归属：来自扣分的记 penalty_points，保底补的那 1 次记 second_class。
+  -- 惩罚次数（V2.0.16 口径，用户确认）：
+  --   基础惩罚 = floor(负分绝对值 / v_penalty_thr)
+  --   排名惩罚 = 名单内（月净分倒数 v_n 名，含并列）且本月奖励次数 = 0 → 追加 1 次
+  --   抵消     = 基础惩罚与排名惩罚重合时自动减 1（等价于：名单内 final = max(基础, 1)）
+  --   封顶     = 单人单月惩罚最多 3 次
   insert into public.lottery_chances (student_id, period_key, pool_type, chance_type, amount, source_week_key)
   select q.student_id, v_month_key, 'penalty',
          case when q.base_points > 0 then 'penalty_points' else 'second_class' end,
          q.final_amount, ''
     from (
-      select s.id as student_id,
-             floor(coalesce(x.ded_total,0) / v_penalty_thr)::int as base_points,
-             greatest(
-               (case when s.id = any(v_second_ids)
-                     then greatest(floor(coalesce(x.ded_total,0) / v_penalty_thr)::int, 1)
-                     else floor(coalesce(x.ded_total,0) / v_penalty_thr)::int end)
-               - (case when s.id = any(v_second_ids)
-                        and floor(coalesce(x.add_total,0) / v_reward_thr) >= 1 then 1 else 0 end),
-               0
-             ) as final_amount
-        from public.students s
-        left join (
-          select rec.student_id,
-                 sum(case when rec.points < 0 then abs(rec.points) else 0 end) as ded_total,
-                 sum(case when rec.points > 0 then rec.points else 0 end) as add_total
-            from public.records rec
-           where rec.status = '正常'
-             and rec.record_date >= to_char(v_sd, 'YYYY-MM-DD')
-             and rec.record_date <  to_char(v_ed, 'YYYY-MM-DD')
-           group by rec.student_id
-        ) x on x.student_id = s.id
+      select a.student_id, a.base_points,
+             least(
+               case when a.in_list and a.reward_total = 0
+                    then greatest(a.base_points, 1)
+                    else a.base_points end,
+               3) as final_amount
+        from (
+          select s.id as student_id,
+                 floor(greatest(-(coalesce(x.add_total,0) - coalesce(x.ded_total,0)), 0) / v_penalty_thr)::int as base_points,
+                 (s.id = any(v_second_ids)) as in_list,
+                 (case when rank() over (order by coalesce(x.add_total,0) - coalesce(x.ded_total,0) desc) <= v_top_n
+                       then 1 else 0 end)
+                 + floor(greatest(coalesce(x.add_total,0) - coalesce(x.ded_total,0), 0) / v_reward_thr)::int as reward_total
+            from public.students s
+            left join (
+              select rec.student_id,
+                     sum(case when rec.points > 0 then rec.points else 0 end) as add_total,
+                     sum(case when rec.points < 0 then abs(rec.points) else 0 end) as ded_total
+                from public.records rec
+               where rec.status = '正常'
+                 and rec.record_date >= to_char(v_sd, 'YYYY-MM-DD')
+                 and rec.record_date <  to_char(v_ed, 'YYYY-MM-DD')
+               group by rec.student_id
+            ) x on x.student_id = s.id
+        ) a
     ) q
    where q.final_amount > 0
   on conflict (student_id, period_key, chance_type, source_week_key) do nothing;
@@ -462,30 +480,56 @@ begin
 
   -- 记录本月应得/已抽情况（供快照与 reward_forfeit 标注）
   select coalesce(jsonb_agg(jsonb_build_object(
-           'student_id', c.student_id, 'name', s.name,
-           'amount', c.amount, 'used_before_auto', c.used_count,
-           'remaining_before_auto', c.amount - c.used_count) order by s.name), '[]'::jsonb)
+           'student_id', g.student_id, 'name', g.name,
+           'amount', g.amount, 'used_before_auto', g.used,
+           'remaining_before_auto', g.amount - g.used,
+           'top15_bonus', g.top15_bonus, 'net_bonus', g.net_bonus) order by g.name), '[]'::jsonb)
     into v_reward_rows
-    from public.lottery_chances c join public.students s on s.id = c.student_id
-   where c.period_key = v_month_key and c.pool_type = 'reward';
+    from (
+      select c.student_id, s.name,
+             sum(c.amount)::int as amount,
+             sum(c.used_count)::int as used,
+             sum(case when c.chance_type = 'monthly_top15' then c.amount else 0 end)::int as top15_bonus,
+             sum(case when c.chance_type = 'monthly_points' then c.amount else 0 end)::int as net_bonus
+        from public.lottery_chances c join public.students s on s.id = c.student_id
+       where c.period_key = v_month_key and c.pool_type = 'reward'
+       group by c.student_id, s.name
+    ) g;
 
   select coalesce(jsonb_agg(jsonb_build_object(
-           'student_id', c.student_id, 'name', s.name, 'chance_type', c.chance_type,
-           'amount', c.amount, 'used_before_auto', c.used_count,
-           'remaining_before_auto', c.amount - c.used_count) order by s.name), '[]'::jsonb)
+           'student_id', g.student_id, 'name', g.name, 'chance_type', g.chance_type,
+           'amount', g.amount, 'base_amount', g.base_amount, 'rank_amount', g.rank_amount,
+           'in_list', g.in_list,
+           'used_before_auto', g.used,
+           'remaining_before_auto', g.amount - g.used) order by g.name), '[]'::jsonb)
     into v_penalty_rows
-    from public.lottery_chances c join public.students s on s.id = c.student_id
-   where c.period_key = v_month_key and c.pool_type = 'penalty';
+    from (
+      select c.student_id, s.name,
+             min(c.chance_type) as chance_type,
+             sum(c.amount)::int as amount,
+             sum(case when c.chance_type = 'penalty_points' then c.amount else 0 end)::int as base_amount,
+             sum(case when c.chance_type = 'second_class' then c.amount else 0 end)::int as rank_amount,
+             (s.id = any(v_second_ids)) as in_list,
+             sum(c.used_count)::int as used
+        from public.lottery_chances c join public.students s on s.id = c.student_id
+       where c.period_key = v_month_key and c.pool_type = 'penalty'
+       group by c.student_id, s.name, s.id
+    ) g;
 
   -- 第二类学生未使用的奖励次数：账面标 reward_forfeit（结果照常自动抽、不追回）
   select coalesce(jsonb_agg(jsonb_build_object(
-           'student_id', c.student_id, 'name', s.name,
-           'remaining', c.amount - c.used_count, 'reward_forfeit', true) order by s.name), '[]'::jsonb)
+           'student_id', g.student_id, 'name', g.name,
+           'remaining', g.remaining, 'reward_forfeit', true) order by g.name), '[]'::jsonb)
     into v_forfeit
-    from public.lottery_chances c join public.students s on s.id = c.student_id
-   where c.period_key = v_month_key and c.pool_type = 'reward'
-     and c.used_count < c.amount
-     and c.student_id = any(v_second_ids);
+    from (
+      select c.student_id, s.name, sum(c.amount - c.used_count)::int as remaining
+        from public.lottery_chances c join public.students s on s.id = c.student_id
+       where c.period_key = v_month_key and c.pool_type = 'reward'
+         and c.used_count < c.amount
+         and c.student_id = any(v_second_ids)
+       group by c.student_id, s.name
+    ) g
+   where true;
 
   -- 未用次数自动抽选（奖励池 + 惩罚池）
   for v_p in
@@ -502,7 +546,7 @@ begin
     'type', 'month',
     'month_key', v_month_key,
     'range_start', v_start,
-    'range_end', v_end,
+    'range_end', (v_ed - 1),
     'groups', v_groups,
     'individuals', v_individuals,
     'second_class', v_second,
@@ -526,7 +570,7 @@ begin
     'period', 'settlement', (select id from public.settlements
                               where boundary_id = p_boundary_id and status <> 'rolled_back' limit 1));
   perform public.write_audit('monthly_settle', 'boundary', p_boundary_id::text,
-    jsonb_build_object('month_key', v_month_key, 'second_class', jsonb_array_length(v_second),
+    jsonb_build_object('month_key', v_month_key, 'penalty_rank_list', jsonb_array_length(v_second),
                        'auto_draw_count', v_auto_total, 'cards_expired', v_cards_exp));
   return v_summary;
 end;
@@ -618,7 +662,7 @@ begin
     raise exception '该月已结算完成，不能自动重算（历史快照与抽选结果不可追改）';
   end if;
 
-  v_month_key := to_char((v_b.boundary_at - interval '1 second') at time zone 'Asia/Shanghai', 'YYYY-MM');
+  v_month_key := v_b.period_key;
 
   -- 清理上次失败的半成品（只清理本结算点产生的自动数据与次数）
   delete from public.lottery_draws

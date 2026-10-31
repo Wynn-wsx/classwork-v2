@@ -26,11 +26,13 @@ ORDER = [
     "00_header.sql", "10_extensions.sql", "20_tables.sql", "30_helpers.sql", "40_rls.sql",
     "50_records.sql", "51_config_period.sql", "52_lottery.sql", "53_period_jobs.sql",
     "54_accounts.sql", "55_notify_appeals.sql", "56_admin_data.sql", "57_admin_ops.sql",
-    "58_teardown.sql", "59_ops_v205.sql", "60_seeds.sql", "61_ops_v208.sql", "62_ops_v209.sql", "63_ops_v211.sql",
+    "58_teardown.sql", "59_ops_v205.sql", "60_seeds.sql", "61_ops_v208.sql", "62_ops_v209.sql", "63_ops_v211.sql", "64_ops_v214.sql",
+    "65_ops_v219.sql",
     "95_grants.sql", "90_verify.sql",
 ]
 
 EXPECTED_FUNCS = [
+    "admin_group_week_board", "admin_draw_group_manual",
     "admin_import_records",
     "starlight_import",
     "admin_export_records",

@@ -158,39 +158,74 @@ language sql immutable as $$
   select p_date - (extract(isodow from p_date)::int - 1);
 $$;
 
--- 最近一个已到点的指定类型分隔点（month/week/rule_update）
-create or replace function public.boundary_of(p_type text)
+-- ------------------------------------------------------------
+-- V2.0.19 周期（区间）解析：周/月存 start_date ~ end_date，进行中的月 end_date 为空
+-- period_key = 起始日期（稳定，不随周期关闭而改变）
+-- ------------------------------------------------------------
+create or replace function public.period_of_date(p_type text, p_date date)
 returns public.boundaries
 language sql stable security definer set search_path = public, extensions as $$
   select b.* from public.boundaries b
-   where b.type = p_type and b.boundary_at <= now()
-   order by b.boundary_at desc
+   where b.type = p_type
+     and b.deprecated = false
+     and b.start_date is not null
+     and b.start_date <= p_date
+     and coalesce(b.end_date, '9999-12-31'::date) >= p_date
+   order by b.start_date desc
    limit 1;
+$$;
+
+-- 「当前」周期：优先含今天的；否则最近已开始的；否则最早一条
+create or replace function public.current_period(p_type text)
+returns public.boundaries
+language plpgsql stable security definer set search_path = public, extensions as $$
+declare v public.boundaries;
+begin
+  v := public.period_of_date(p_type, public.bj_today());
+  if v.id is not null then return v; end if;
+  select b.* into v from public.boundaries b
+   where b.type = p_type and b.deprecated = false and b.start_date is not null
+     and b.start_date <= public.bj_today()
+   order by b.start_date desc limit 1;
+  if v.id is not null then return v; end if;
+  select b.* into v from public.boundaries b
+   where b.type = p_type and b.deprecated = false and b.start_date is not null
+   order by b.start_date limit 1;
+  return v;
+end;
+$$;
+
+create or replace function public.boundary_of(p_type text)
+returns public.boundaries
+language sql stable security definer set search_path = public, extensions as $$
+  select public.current_period(p_type);
+$$;
+
+create or replace function public.period_key_of(p_type text, p_date date)
+returns text
+language sql stable security definer set search_path = public, extensions as $$
+  select (public.period_of_date(p_type, p_date)).period_key;
 $$;
 
 create or replace function public.current_month_key() returns text
 language sql stable security definer set search_path = public, extensions as $$
-  select coalesce(
-    (public.boundary_of('month')).period_key,
-    public.bj_month_key()
-  );
+  select coalesce((public.current_period('month')).period_key, public.bj_month_key());
 $$;
 
 create or replace function public.current_week_key() returns text
 language sql stable security definer set search_path = public, extensions as $$
-  select coalesce(
-    (public.boundary_of('week')).period_key,
-    public.bj_week_start(public.bj_today())::text
-  );
+  select coalesce((public.current_period('week')).period_key, public.bj_week_start(public.bj_today())::text);
 $$;
 
 create or replace function public.next_month_boundary_at() returns timestamptz
 language sql stable security definer set search_path = public, extensions as $$
   select coalesce(
-    (select min(b.boundary_at) from public.boundaries b
-      where b.type = 'month' and b.boundary_at > now()),
-    ((date_trunc('month', (now() at time zone 'Asia/Shanghai')) + interval '1 month')
-      at time zone 'Asia/Shanghai')
+    (select (b.end_date + 1)::timestamp at time zone 'Asia/Shanghai'
+       from public.boundaries b
+      where b.type = 'month' and b.deprecated = false and b.end_date is not null
+        and b.end_date >= public.bj_today()
+      order by b.start_date limit 1),
+    ((public.bj_week_start(public.bj_today()) + 7)::timestamp at time zone 'Asia/Shanghai')
   );
 $$;
 
@@ -199,12 +234,14 @@ language sql stable security definer set search_path = public, extensions as $$
   select p_date > public.bj_today();
 $$;
 
--- 该业务日期所属登记月是否已冻结（早于最近一个已到点的月分隔点即冻结）
+-- 该业务日期是否落在「已结算且已结束」的月区间内（冻结）
 create or replace function public.is_month_frozen(p_date date) returns boolean
 language sql stable security definer set search_path = public, extensions as $$
-  select coalesce(
-    p_date < ((public.boundary_of('month')).boundary_at at time zone 'Asia/Shanghai')::date,
-    false
+  select exists (
+    select 1 from public.boundaries b
+     where b.type = 'month' and b.deprecated = false and b.settled = true
+       and b.end_date is not null
+       and p_date <= b.end_date
   );
 $$;
 

@@ -66,7 +66,7 @@ begin
       left join (
         select l.student_id, sum(l.change_amount)::int as month_change
           from public.starlight_logs l
-         where to_char(l.created_at at time zone 'Asia/Shanghai', 'YYYY-MM') = v_month
+         where l.period_key = v_month
          group by l.student_id
       ) mc on mc.student_id = s.id
       left join (
@@ -198,7 +198,7 @@ begin
     (student_id, change_amount, source, period_key, note, operator_id, created_at)
   values
     (p_student_id, p_change_amount, 'manual',
-     to_char(v_at at time zone 'Asia/Shanghai', 'YYYY-MM'), v_note, auth.uid(), v_at)
+     coalesce(public.period_key_of('month', (v_at at time zone 'Asia/Shanghai')::date), public.current_month_key()), v_note, auth.uid(), v_at)
   returning * into v_log;
 
   v_balance := public._recalc_starlight(p_student_id);
@@ -261,7 +261,7 @@ begin
      set change_amount = v_amount,
          note          = v_note,
          created_at    = v_at,
-         period_key    = to_char(v_at at time zone 'Asia/Shanghai', 'YYYY-MM')
+         period_key    = coalesce(public.period_key_of('month', (v_at at time zone 'Asia/Shanghai')::date), public.current_month_key())
    where l.id = p_log_id
    returning * into v_log;
 

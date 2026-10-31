@@ -5,7 +5,7 @@
 - 线上地址：<https://wynn-wsx.github.io/classwork-v2/>（V2.0 正式版）
 - 源码仓库：<https://github.com/Wynn-wsx/classwork-v2>
 - 线上后端：Supabase（PostgreSQL + Auth + RLS）
-- 当前版本：网页版 **V2.0.0（正式版）**；旧版 V1.6 站点 <https://wynn-wsx.github.io/classwork/> 保留作回退
+- 当前版本：网页版 **V2.1.0（正式版）**；旧版 V1.6 站点 <https://wynn-wsx.github.io/classwork/> 保留作回退
 
 ## 项目状态（重要）
 
@@ -26,7 +26,7 @@
 │  ├─ schema.sql                 #   V2.0 全量库结构（幂等，可重复执行）
 │  ├─ migration_v2.0.sql         #   V1.6 → V2.0 增量迁移（线上用这个，含数据回填与自检）
 │  ├─ rollback_v1.6_policies.sql #   应急回退（恢复 V1.6 策略，不动数据）
-│  ├─ enable_pgcron.sql          #   启用 pg_cron 周期作业
+│  ├─ enable_pgcron.sql          #   取消/恢复 pg_cron 周期作业（V2.0.17 起默认不启用）
 │  ├─ _build/                    #   模块化 SQL 源 + build_sql.py / check_sql.py / 测试脚本
 │  ├─ 部署说明.md                 #   面向老师的零基础部署教程
 │  └─ 生成积分规则_加扣分速查.sql    #   积分规则速查
@@ -41,6 +41,10 @@
 ├─ 拾光记_班级日记.html 等         # 班级日记（独立项目，勿动）
 └─ README.md / CHANGELOG.md / .gitignore
 ```
+
+## 快速开始（正式库升级）
+
+在 Supabase SQL Editor 执行 `supabase/upgrade_v2.1.0_正式库升级.sql`，再进「设置 → 周期定义」建立当前周/月。
 
 ## 快速开始
 
@@ -86,7 +90,7 @@ python -m http.server 8000
 | [supabase/部署说明.md](supabase/部署说明.md) | 非技术用户视角的完整部署教程（保留） |
 | [开发文件/docs/V2.0_总体设计方案.md](开发文件/docs/V2.0_总体设计方案.md) | V2.0 需求口径与设计（时间规则、抽选、星光、通知、申诉、角色） |
 | [开发文件/docs/V2.0_RPC接口清单.md](开发文件/docs/V2.0_RPC接口清单.md) | V2.0 全部 70 个 RPC 的参数与返回 |
-| [开发文件/docs/数据库升级与部署说明_V2.0.md](开发文件/docs/数据库升级与部署说明_V2.0.md) | V1.6 → V2.0 数据库升级、pg_cron、回退 |
+| [开发文件/docs/数据库升级与部署说明_V2.0.md](开发文件/docs/数据库升级与部署说明_V2.0.md) | V1.6 → V2.0 数据库升级、pg_cron（已取消）、回退 |
 | [开发文件/docs/M2_验收测试步骤.md](开发文件/docs/M2_验收测试步骤.md) | 数据库层验收步骤（SQL Editor 逐节操作） |
 | [开发文件/docs/V2.0_开发进度与验收记录.md](开发文件/docs/V2.0_开发进度与验收记录.md) | V2.0 各模块进度、验证证据、复跑方法、待确认项 |
 

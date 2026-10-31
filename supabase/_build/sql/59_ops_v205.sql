@@ -184,32 +184,37 @@ begin
   end if;
 
   if p_type = 'week' then
-    select coalesce(jsonb_agg(x order by x->>'boundary_at' desc), '[]'::jsonb) into v_list
+    -- 只列「已结束」的周（进行中的周还没有汇总意义）
+    select coalesce(jsonb_agg(x order by (x->>'start_date') desc), '[]'::jsonb) into v_list
       from (
         select jsonb_build_object(
+                 'type', 'week',
                  'period_key', b.period_key,
+                 'start_date', b.start_date,
+                 'end_date', b.end_date,
                  'boundary_id', b.id,
                  'boundary_at', b.boundary_at,
                  'settled', b.settled,
+                 'rule_weeks', b.rule_weeks,
                  'has_summary', exists (select 1 from public.weekly_summaries w where w.boundary_id = b.id),
                  'label', b.label
                ) as x
           from public.boundaries b
          where b.type = 'week'
-           and b.boundary_at <= now()
-         order by b.boundary_at desc
+           and b.start_date is not null
+           and coalesce(b.end_date, b.start_date) < public.bj_today()
+         order by b.start_date desc
          limit greatest(coalesce(p_limit, 60), 1)
       ) q;
   else
-    -- 月分隔点：结算的是“刚结束的那个月”，所以对外的 period_key 用结算月（分隔点所在月 - 1 个月）
-    select coalesce(jsonb_agg(x order by x->>'boundary_at' desc), '[]'::jsonb) into v_list
+    -- 月：含「进行中」的那一个（end_date 为空），方便前端显示「开始日期 ~ 进行中」
+    select coalesce(jsonb_agg(x order by (x->>'start_date') desc nulls last), '[]'::jsonb) into v_list
       from (
         select jsonb_build_object(
-                 'period_key', coalesce(
-                     (select s.period_key from public.settlements s
-                       where s.boundary_id = b.id and s.status <> 'rolled_back'
-                       order by s.started_at desc limit 1),
-                     to_char((b.boundary_at at time zone 'Asia/Shanghai') - interval '1 month', 'YYYY-MM')),
+                 'type', 'month',
+                 'period_key', b.period_key,
+                 'start_date', b.start_date,
+                 'end_date', b.end_date,
                  'boundary_id', b.id,
                  'boundary_at', b.boundary_at,
                  'settled', b.settled,
@@ -222,8 +227,9 @@ begin
                ) as x
           from public.boundaries b
          where b.type = 'month'
-           and b.boundary_at <= now()
-         order by b.boundary_at desc
+           and b.start_date is not null
+           and (b.end_date is not null or b.start_date <= public.bj_today())
+         order by (b.end_date is null) desc, b.start_date desc
          limit greatest(coalesce(p_limit, 60), 1)
       ) q;
   end if;
@@ -261,7 +267,8 @@ begin
 
   if p_type = 'week' then
     select * into v_bd from public.boundaries
-     where type = 'week' and period_key = v_key and boundary_at <= now()
+     where type = 'week' and boundary_at <= now()
+      and period_key = v_key
      order by boundary_at desc limit 1;
     if v_bd.id is null then
       raise exception '找不到周「%」的分隔点', v_key;

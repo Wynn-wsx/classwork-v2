@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -317,6 +317,7 @@ table.data.data-compact{min-width:720px}
 .lot-big{font-size:20px;font-weight:700;line-height:1.35;word-break:break-all}
 .lot-hint{text-align:center;color:var(--text-2);font-size:13px;margin:4px 0 8px}
 .lot-extra{max-height:180px;overflow:auto}
+#modalBox.modal-wide{max-width:900px}
 .modal-box table.data{min-width:0}
   /* V2.0.9 表格直改 / 仓库分组合并 */
   table.data.my-list td.wrap{white-space:normal;word-break:break-word;line-height:1.5}
@@ -422,7 +423,7 @@ table.data.my-list{min-width:0}
 const SUPABASE_URL = 'https://rdwbtyecityxopofjokj.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJkd2J0eWVjaXR5eG9wb2Zqb2tqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI4NDg0MzgsImV4cCI6MjEwODQyNDQzOH0.s8zcarl9bhJn1_yOtchGr1gWYCBhtM8-puiGmChFk0s';
 const EMAIL_DOMAIN = '@banji.local';
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '2.1.0';
 
 /* 正式版 V2.0.0：默认连接上述 Supabase 项目；本地调试时可在页面加载前注入
    window.__SB_OVERRIDE__ = { url, key } 临时指向其他项目 */
@@ -869,7 +870,9 @@ function todayStr(){ return fmtDate(new Date()); }
 function monthsAgoStr(n){ const d=new Date(); d.setMonth(d.getMonth()-n); return fmtDate(d); }
 function fmtDateTime(iso){
   if(!iso) return '';
-  try{ const d=new Date(iso); return `${fmtDate(d)} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; }catch(e){ return iso; }
+  if(typeof iso === 'string' && !/^\d{4}-\d{2}-\d{2}/.test(iso)) return iso; // 后端已格式化的短串（如 10-31 18:36）直接显示
+  try{ const d=new Date(iso); if(isNaN(d.getTime())) return String(iso);
+    return `${fmtDate(d)} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; }catch(e){ return String(iso); }
 }
 function fmtBeijingTime(iso){
   if(!iso) return '';
@@ -895,7 +898,7 @@ function toast(msg, type){
   t._timer=setTimeout(()=>{ t.className=''; }, 2600);
 }
 
-function openModal(html){ document.getElementById('modalBox').innerHTML=html; document.getElementById('modalOverlay').classList.remove('hidden'); }
+function openModal(html){ const b=document.getElementById('modalBox'); b.innerHTML=html; b.classList.toggle('modal-wide', String(html).indexOf('data-compact')>=0); document.getElementById('modalOverlay').classList.remove('hidden'); }
 function closeModal(){ document.getElementById('modalOverlay').classList.add('hidden'); }
 function confirmDialog(title, message, onYes, danger){
   openModal(`
@@ -1265,16 +1268,11 @@ function renderPeriodBar(){
   if(!el) return;
   const p=APP.period||{};
   const parts=[];
-  if(p.week_key) parts.push(`<span class="pill pill-week" title="当前周">周 ${esc(p.week_key)}</span>`);
-  if(p.month_key) parts.push(`<span class="pill pill-month" title="当前月">月 ${esc(p.month_key)}</span>`);
-  if(p.next_week_at){
-    const ms=new Date(p.next_week_at).getTime() - serverNow();
-    parts.push(`<span class="pill" title="下个周分隔点：${esc(fmtDateTime(p.next_week_at))}">周结算 ${fmtCountdown(ms)}</span>`);
-  }
-  if(p.next_month_at){
-    const ms=new Date(p.next_month_at).getTime() - serverNow();
-    parts.push(`<span class="pill ${ms < 3600000 ? 'pill-warn' : ''}" title="下个月分隔点：${esc(fmtDateTime(p.next_month_at))}">月结算 ${fmtCountdown(ms)}</span>`);
-  }
+  const _m=(s)=>{const a=String(s||'').split('-');return a.length===3?(a[1]+'-'+a[2]):String(s||'');};
+  const _bd=(type,key)=>(DB.boundaries||[]).find(b=>b.type===type && String(b.period_key)===String(key));
+  if(p.week_key){const b=_bd('week',p.week_key);parts.push(`<span class="pill pill-week" title="当前周（起止日期）">周 ${esc(b?(_m(b.start_date)+'~'+_m(b.end_date)):p.week_key)}</span>`);}
+  if(p.month_key){const b=_bd('month',p.month_key);parts.push(`<span class="pill pill-month" title="当前月（起止日期）">月 ${esc(b?(_m(b.start_date)+'~'+(b.end_date?_m(b.end_date):'今日')):p.month_key)}</span>`);}
+  parts.push(`<span class="pill dim" title="系统不自动结算，由管理员手动触发">手动结算</span>`);
   if(APP.maintenance) parts.push(`<span class="pill pill-danger">维护中</span>`);
   el.innerHTML = parts.join('');
 
@@ -1505,7 +1503,7 @@ function renderScore(){
         <button class="btn btn-success" onclick="submitScore()">提交登记</button>
       </div>
     </div>
-    <div class="dim" style="font-size:12px">* 选择“类型→分类→原因”后分值自动带出，也可手动修改。</div>
+    <div class="dim" style="font-size:12px">* 选择“类型→分类→原因”后分值自动带出，也可手动修改（规则上限按「每个学生每周期」统计）。</div>
     <div id="scRuleRemark" class="hidden" style="margin-top:8px;padding:8px 10px;background:#fff8e6;border:1px solid #f0e0b0;border-radius:8px;color:#9a6b00;font-size:12px"></div>`;
   populateScoreStudents();
   onScoreTypeChange();
@@ -1521,6 +1519,7 @@ function populateScoreStudents(){
     if(g) students=students.filter(s=>s.group_name===g);
   }
   sel.innerHTML=studentOptionsHtml(students);
+  sel.onchange=onScoreReasonChange;
 }
 function onScoreGroupChange(){ populateScoreStudents(); }
 function onScoreTypeChange(){
@@ -1555,16 +1554,31 @@ function onScoreReasonChange(){
     else { rr.classList.add('hidden'); rr.innerHTML=''; }
   }
 }
-/* 规则本周期用量：用于“已用 n / 上限 m”提示（真正拦截在数据库 RPC 里） */
-function ruleUsage(rule){
+/* 规则上限的“本周期”起点：数据库按最近一次 week / rule_update / month 分隔点计算 */
+function limitPeriodStart(){
+  const now=Date.now(); let start=null;
+  (DB.boundaries||[]).forEach(b=>{
+    if(!b || (b.type!=='week' && b.type!=='rule_update' && b.type!=='month')) return;
+    const t=new Date(b.boundary_at).getTime();
+    if(!isFinite(t) || t>now) return;
+    if(start===null || t>start) start=t;
+  });
+  if(start===null) return null;
+  const d=new Date(start+8*3600e3);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`;
+}
+/* 规则上限用量：按“被登记的学生”统计（与数据库 check_rule_limit 口径一致） */
+function ruleUsage(rule, studentId){
   if(!rule || !rule.limit_type || rule.limit_type==='none' || !(+rule.limit_value>0)) return null;
-  const monthKey=(APP.period && APP.period.month_key) || '';
-  const used=DB.records.filter(x=>x.rule_id===rule._id && x.status==='正常' &&
-      (!monthKey || !x.period_key || x.period_key===monthKey))
+  const sel=document.getElementById('scStudent');
+  const sid=studentId || (sel?sel.value:'');
+  if(!sid) return null;
+  const start=limitPeriodStart();
+  const used=DB.records.filter(x=>x.status==='正常' && x.rule_id===rule._id && x.student_id===sid &&
+      (!start || (x.record_date && String(x.record_date)>=start)))
     .reduce((acc,x)=>acc+((rule.limit_type==='points')?Math.abs(+x.points||0):1),0);
   const limit=+rule.limit_value;
-  const over=used>=limit;
-  return `本周期已用 ${used} / 上限 ${limit}${over?'（已达上限）':''}`;
+  return `该生本周期已用 ${used} / 上限 ${limit}${used>=limit?'（已达上限）':''}`;
 }
 function currentScoreRule(){
   const t=document.getElementById('scType').value;
@@ -1648,7 +1662,7 @@ async function submitScore(){
   if(r.code!==0){ toast(r.msg,'err'); return; }
   DB.records.push(r.doc);
   document.getElementById('scRemark').value='';
-  const usage=ruleUsage(rule);
+  const usage=ruleUsage(rule, studentId);
   toast('积分登记成功' + (usage?('　' + usage):''),'ok');
   onScoreReasonChange();
 }
@@ -2303,8 +2317,8 @@ async function exportSummaries(type){
         '结束': it.range_end?fmtDateTime(it.range_end):'',
         '奖励小组': (sm.reward_groups||[]).map(g=>g.group_name||g).join('、'),
         '惩罚小组': (sm.penalty_groups||[]).map(g=>g.group_name||g).join('、'),
-        '集体奖励抽选次数': sm.reward_group_chances||0,
-        '集体惩罚抽选次数': sm.penalty_group_chances||0,
+        '建议奖励小组': (sm.reward_groups||[]).map(g=>g.group_name).join('、'),
+        '建议惩罚小组': (sm.penalty_groups||[]).map(g=>g.group_name).join('、'),
         '快照状态': (sm.effects_done===false?'仅快照':'已结算')
       };
     });
@@ -2317,6 +2331,8 @@ async function exportSummaries(type){
         '完成时间': it.finished_at?fmtDateTime(it.finished_at):'',
         '自动抽选次数': it.auto_draw_count||0,
         '按排名惩罚名单': (it.second_class||[]).map(x=>x.name||x).join('、'),
+        '奖励次数合计': ((it.reward&&it.reward.rows)||[]).reduce((a,x)=>a+Number(x.amount||0),0),
+        '惩罚次数合计': ((it.penalty&&it.penalty.rows)||[]).reduce((a,x)=>a+Number(x.amount||0),0),
         '奖励人数': (it.reward_rows||(sm.reward&&sm.reward.rows)||[]).length,
         '惩罚人数': (it.penalty_rows||(sm.penalty&&sm.penalty.rows)||[]).length
       };
@@ -2740,8 +2756,8 @@ function renderRules(){
 }
 function limitText(r){
   const t=r.limit_type||'none';
-  if(t==='count') return `每周期最多 ${r.limit_value} 次`;
-  if(t==='points') return `每周期最多 ${r.limit_value} 分`;
+  if(t==='count') return `每生每周期最多 ${r.limit_value} 次`;
+  if(t==='points') return `每生每周期最多 ${r.limit_value} 分`;
   return '<span class="dim">不限</span>';
 }
 function ruleFormHtml(r){
@@ -2753,13 +2769,14 @@ function ruleFormHtml(r){
     <div class="modal-field"><label>分类</label><input class="field" id="rCate" value="${esc(r?.category||'')}" placeholder="输入分类"></div>
     <div class="modal-field"><label>原因</label><input class="field" id="rReason" value="${esc(r?.reason||'')}" placeholder="输入原因"></div>
     <div class="modal-field"><label>分值</label><input class="field" id="rPoints" type="number" step="any" value="${r?r.points:''}" placeholder="输入分值"></div>
-    <div class="modal-field"><label>周期上限</label>
+    <div class="modal-field"><label>周期上限（每个学生）</label>
       <select class="field" id="rLimitType" onchange="onRuleLimitTypeChange()">
         <option value="none" ${lt==='none'?'selected':''}>不限</option>
         <option value="count" ${lt==='count'?'selected':''}>限制次数</option>
         <option value="points" ${lt==='points'?'selected':''}>限制累计分值</option>
       </select></div>
     <div class="modal-field" id="rLimitValueWrap"><label>上限值</label><input class="field" id="rLimitValue" type="number" min="0" step="1" value="${r&&r.limit_value?r.limit_value:''}" placeholder="如 2（次）或 6（分）"></div>
+    <div class="dim" style="font-size:12px;margin-top:-6px">按「每个学生每个周期」分别统计：同一学生在同一规则下本周期最多登记这么多，不影响其他学生。</div>
     <div class="modal-field"><label>备注</label><textarea class="field" id="rRemark" placeholder="选填，如：每周最多加分6次">${esc(r?.remark||'')}</textarea></div>`;
 }
 function onRuleLimitTypeChange(){
@@ -2871,53 +2888,66 @@ let _lotStatus='';
 let _lotPeriod='';           // 个人抽选周期（YYYY-MM），空表示当前月
 let _lotWeek='';             // 小组抽选周期（IYYY-IW，如 2026-43），空表示当前周
 let _lotTab='draw', _lotMode='group', _lotPool='reward';
-function curMonthKey(){ return (APP&&APP.period&&APP.period.month_key) || new Date().toISOString().slice(0,7); }
-function lotMonths(n){
-  const base=curMonthKey(); const [y,m]=base.split('-').map(x=>parseInt(x,10));
-  const out=[]; let yy=y, mm=m;
-  for(let i=0;i<(n||12);i++){ out.push(yy+'-'+String(mm).padStart(2,'0')); mm--; if(mm===0){ mm=12; yy--; } }
-  return out;
+function curMonthKey(){ return (APP&&APP.period&&APP.period.month_key) || todayStr(); }
+// 周期一律来自「周期定义」（boundaries），按开始日期倒序
+function monthPeriods(n){
+  return (DB.boundaries||[]).filter(b=>b.type==='month'&&b.start_date)
+    .slice().sort((a,b)=>String(b.start_date).localeCompare(String(a.start_date))).slice(0,n||12);
+}
+function weekPeriods(n){
+  return (DB.boundaries||[]).filter(b=>b.type==='week'&&b.start_date)
+    .slice().sort((a,b)=>String(b.start_date).localeCompare(String(a.start_date))).slice(0,n||12);
+}
+function lotMonths(n){ return monthPeriods(n).map(b=>b.period_key); }
+function monthLabelOf(k){
+  const b=(DB.boundaries||[]).find(x=>x.type==='month'&&String(x.period_key||'')===String(k||''));
+  return b?periodRangeText(b,'month'):String(k||'');
 }
 function lotPeriodOf(){ return _lotPeriod||curMonthKey(); }
 function curWeekKey(){ return (APP&&APP.period&&APP.period.week_key)||''; }
-// 最近 n 个已到点的周（来自 DB.boundaries，新的在前）
-function lotWeeks(n){
-  const cut=Date.now();
-  const seen={};
-  (DB.boundaries||[]).forEach(b=>{
-    if(b.type!=='week') return;
-    if(new Date(b.boundary_at).getTime()>cut) return;
-    if(!b.period_key||seen[b.period_key]) return;
-    seen[b.period_key]=b;
-  });
-  return Object.keys(seen).sort().reverse().slice(0,n||12);
+function lotWeeks(n){ return weekPeriods(n).map(b=>b.period_key); }
+function lastClosedWeekKey(){
+  const today=todayStr();
+  const closed=weekPeriods(60).find(b=>b.end_date&&String(b.end_date)<today);
+  return closed?closed.period_key:curWeekKey();
 }
 function weekBoundary(k){
-  return (DB.boundaries||[]).find(b=>b.type==='week'&&b.period_key===k)||null;
+  return (DB.boundaries||[]).find(b=>b.type==='week'&&String(b.period_key||'')===String(k||''))||null;
 }
-function weekStartOf(k){ const b=weekBoundary(k); return b?new Date(b.boundary_at):null; }
-// 周所属月份（按周分隔点的北京时间取 YYYY-MM）
+function weekStartOf(k){
+  const b=weekBoundary(k);
+  return b&&b.start_date?new Date(b.start_date+'T00:00:00+08:00'):null;
+}
+function weekEndExclOf(k){
+  const b=weekBoundary(k);
+  if(!b||!b.end_date) return null;
+  const end=new Date(b.end_date+'T00:00:00+08:00');
+  return new Date(end.getTime()+86400000);   // 含结束日 → 次日 00:00 为开区间上界
+}
 function weekMonthOf(k){
-  const b=weekBoundary(k); if(!b) return curMonthKey();
-  const d=new Date(new Date(b.boundary_at).getTime()+8*3600*1000);
-  return d.toISOString().slice(0,7);
+  const b=weekBoundary(k);
+  if(!b||!b.start_date) return curMonthKey();
+  const d=String(b.start_date);
+  const mp=(DB.boundaries||[])
+    .filter(x=>x.type==='month'&&x.start_date&&String(x.start_date)<=d&&(!x.end_date||String(x.end_date)>=d))
+    .sort((a,c)=>String(c.start_date).localeCompare(String(a.start_date)))[0];
+  return mp?mp.period_key:curMonthKey();
 }
 function weekLabelOf(k){
-  const st=weekStartOf(k); if(!st) return k;
-  const end=new Date(st.getTime()+6*86400*1000);
-  return `${k}（${fmtDay(st)} ~ ${fmtDay(end)}）`;
+  const b=weekBoundary(k);
+  return b?periodRangeText(b,'week'):String(k||'');
 }
-function lotWeekOf(){ return _lotWeek||curWeekKey(); }
+function lotWeekOf(){ return _lotWeek||lastClosedWeekKey(); }
 function setLotWeek(v){
   _lotWeek=v||'';
   if(_lotTab==='draws') renderLotDraws(); else renderLotDrawArea();
 }
 function lotWeekBar(allowAll){
   const cur=_lotWeek;
-  const opts=lotWeeks(12).map(k=>`<option value="${k}"${cur===k?' selected':''}>${esc(weekLabelOf(k))}</option>`).join('');
+  const opts=weekPeriods(12).map(b=>`<option value="${esc(b.period_key)}"${cur===b.period_key?' selected':''}>${esc(periodRangeText(b,'week'))}</option>`).join('');
   return `<span class="lbl">小组周期（周）</span>
     <select class="field" onchange="setLotWeek(this.value)">
-      ${allowAll?`<option value=""${cur===''?' selected':''}>全部周</option>`:''}
+      ${allowAll?`<option value=""${cur===''?' selected':''}>全部</option>`:''}
       ${opts}
     </select>`;
 }
@@ -2927,10 +2957,10 @@ function setLotPeriod(v){
 }
 function lotPeriodBar(allowAll){
   const cur=_lotPeriod;
-  const opts=lotMonths(12).map(k=>`<option value="${k}"${cur===k?' selected':''}>${k}</option>`).join('');
-  return `<span class="lbl">周期</span>
+  const opts=monthPeriods(12).map(b=>`<option value="${esc(b.period_key)}"${cur===b.period_key?' selected':''}>${esc(periodRangeText(b,'month'))}</option>`).join('');
+  return `<span class="lbl">个人周期（月）</span>
     <select class="field" onchange="setLotPeriod(this.value)">
-      ${allowAll?`<option value=""${cur===''?' selected':''}>全部周期</option>`:''}
+      ${allowAll?`<option value=""${cur===''?' selected':''}>全部</option>`:''}
       ${opts}
     </select>`;
 }
@@ -2970,47 +3000,52 @@ async function renderLotDrawArea(){
         <button class="btn btn-sm ${_lotPool==='penalty'?'btn-primary':'btn-ghost'}" onclick="setLotPool('penalty')">惩罚池</button>
       </div>
       <div class="dim small">${_lotMode==='group'
-        ? '周汇总后，小组积分前 3 名各获得 1 次集体奖励抽选、后 2 名各获得 1 次小组惩罚抽选；由小组记录员或班干部代表全组抽选，奖励全组每人各得一份、惩罚全组共担。'
-        : '个人抽选次数在周/月结算时发放（月度积分奖励、第二类追加、扣分惩罚等）；学生可给自己抽，老师与执行小组可代学生抽。'}</div>
+        ? '周汇总只产出排名与建议名单（前 3 名奖励、后 2 名惩罚），不再自动发抽选次数；由执行小组及以上在下方手动为小组抽奖，每组每池每周限一次，奖励全组每人各得一份、惩罚一条结果全组共担。'
+        : '个人抽选次数在月结算时发放（月度积分奖励、第二类追加、扣分惩罚等）；学生本人抽选，执行小组及以上可代学生抽，记录员不再代抽。'}</div>
     </div>`;
   if(_lotMode==='group') await renderLotGroupArea(modeBar);
   else await renderLotIndividualArea(modeBar);
 }
 
 async function renderLotGroupArea(modeBar){
-  const wk=lotWeekOf();
-  const r=await rpc('list_group_chances',{ p_period_key: weekMonthOf(wk), p_week_key: wk||null });
   const box=document.getElementById('lotBody');
+  const r=await rpc('admin_group_week_board',{ p_week_key: lotWeekOf()||null });
   if(r.code!==0){ box.innerHTML=modeBar+`<div class="card"><div class="empty">${esc(r.msg)}</div></div>`; return; }
   const d=r.data||{};
-  const items=(d.items||[]).filter(x=>x.pool_type===_lotPool).sort((a,b)=>cmpGroupName(a.group_name,b.group_name));
-  const canOperate=isTeacher()||isRecorder()||hasStudentAccount();
-  const myGroup=myGroupName();
-  const teacherMode=isTeacher();
-  const rows=items.map(x=>{
-    const mineAllowed=canOperate&&(teacherMode||x.group_name===myGroup);
+  const canDraw=isTeacher();
+  const poolName=POOL_NAME[_lotPool]||_lotPool;
+  const groups=(d.groups||[]).slice().sort((a,b)=>cmpGroupName(a.group_name,b.group_name));
+  const wkOptions=(d.week_options||[]).map(w=>{
+    const b=weekBoundary(w.week_key);
+    const label=b?periodRangeText(b,'week'):(fmtDay(w.range_start)+' ~ '+fmtDay(new Date(new Date(w.range_end).getTime()-86400000)));
+    return `<option value="${esc(w.week_key)}" ${w.week_key===d.week_key?'selected':''}>${esc(label)}${w.has_summary?'（已汇总）':''}</option>`;
+  }).join('');
+  const rows=groups.map(g=>{
+    const drawn=_lotPool==='reward'?g.reward_drawn:g.penalty_drawn;
+    const sug=_lotPool==='reward'?g.reward_suggested:g.penalty_suggested;
+    const item=_lotPool==='reward'?g.reward_item:g.penalty_item;
+    const at=_lotPool==='reward'?g.reward_at:g.penalty_at;
+    const title=(item&&(item.title||item.item_title))||'';
     return `<tr>
-      <td>${mineAllowed&&x.remaining>0?`<input type="checkbox" class="lot-group-chk" value="${esc(x.group_name)}">`:''}</td>
-      <td><b>${esc(x.group_name)}</b></td>
-      <td>${esc(x.note||x.source_week_key||'')}</td>
-      <td>${esc(String(x.remaining))} / ${esc(String(x.amount))}</td>
-      <td>${esc(String(x.members_count||0))} 人</td>
-      <td class="nowrap">${x.remaining>0&&mineAllowed
-        ? `<button class="btn btn-sm ${_lotPool==='reward'?'btn-primary':'btn-danger'}" onclick="drawGroupNow('${esc(x.group_name)}')">抽选</button>`
-        : (x.remaining>0?(canOperate?'<span class="dim small">只能操作自己所在的小组</span>':'<span class="dim small">无操作权限</span>'):'<span class="dim small">已抽完</span>')}</td>
+      <td>${canDraw&&!drawn?`<input type="checkbox" class="lot-group-chk" value="${esc(g.group_name)}">`:''}</td>
+      <td><b>${esc(g.group_name)}</b>${sug?' <span class="badge-status badge-ok">建议</span>':''}</td>
+      <td>${esc(String(g.total==null?'':g.total))}</td>
+      <td>${esc(String(g.pos==null?'':g.pos))}</td>
+      <td>${drawn?`<span class="badge-status badge-warn">已抽</span> ${esc(title)}`:'<span class="dim small">未抽</span>'}</td>
+      <td class="nowrap">${canDraw?(drawn?`<span class="dim small">${esc(at?fmtDateTime(at):'')}</span>`:`<button class="btn btn-sm ${_lotPool==='reward'?'btn-primary':'btn-danger'}" onclick="drawGroupManual('${esc(g.group_name)}')">抽${esc(poolName)}</button>`):'<span class="dim small">仅执行小组及以上可操作</span>'}</td>
     </tr>`;
   }).join('');
   box.innerHTML=modeBar+`
     <div class="card">
       <div class="toolbar">
-        <h3 style="margin:0">小组集体抽选次数（${esc(d.week_key||lotWeekOf())} 周）</h3>
-        ${lotWeekBar(false)}
-        ${canOperate?`<button class="btn btn-sm" onclick="toggleLotGroupAll()">全选</button>
-        <button class="btn btn-sm btn-primary" onclick="batchDrawGroup()">批量抽选选中小组</button>`:''}
-        ${hasStudentAccount()&&!isTeacher()?`<span class="dim small">你可以代表自己所在的小组（${esc(myGroup||'未分组')}）完成本周的集体抽选；同一轮次以最早一次提交为准。</span>`:''}
+        <h3 style="margin:0">小组抽奖 ${esc(weekLabelOf(d.week_key||lotWeekOf()))}${d.has_summary?' <span class="badge-status badge-ok">已汇总</span>':' <span class="badge-status badge-dim">未汇总</span>'}</h3>
+        <select class="input" style="width:auto" onchange="setLotWeek(this.value)">${wkOptions}</select>
+        ${canDraw?`<button class="btn btn-sm" onclick="toggleLotGroupAll()">全选</button>
+        <button class="btn btn-sm btn-primary" onclick="batchDrawGroup()">批量抽${esc(poolName)}</button>`:''}
       </div>
-      ${items.length?`<table class="data"><thead><tr><th></th><th>小组</th><th>来源</th><th>剩余 / 总数</th><th>成员</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>`
-        :`<div class="empty">本周期暂无小组集体抽选次数。每周汇总后会按小组排名生成（前 3 名奖励、后 2 名惩罚）。</div>`}
+      <div class="dim small" style="margin-bottom:8px">周汇总只产出排名与建议名单，不再自动发抽选次数。由执行小组及以上在下方手动为小组抽奖；每组每池每周限一次，如需重抽请先在「仓库管理」作废上次结果。</div>
+      ${groups.length?`<div class="table-wrap"><table class="data data-compact"><thead><tr><th></th><th>小组</th><th>本周积分</th><th>排名</th><th>${esc(poolName)}状态</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`
+        :`<div class="empty">本周还没有小组积分数据。</div>`}
     </div>`;
 }
 function toggleLotGroupAll(){
@@ -3018,10 +3053,11 @@ function toggleLotGroupAll(){
   const all=Array.from(boxes).every(b=>b.checked);
   boxes.forEach(b=>{ b.checked=!all; });
 }
-async function drawGroupNow(groupName){
+async function drawGroupManual(groupName){
   const poolName=POOL_NAME[_lotPool]||_lotPool;
-  confirmDialog('小组集体抽选', `确定代表「${groupName}」抽 1 次${poolName}吗？奖励抽中后全组每人各得一份。`, async ()=>{
-    const r=await rpc('draw_group_lottery',{ p_group_name:groupName, p_pool_type:_lotPool });
+  const wk=lotWeekOf();
+  confirmDialog('小组抽奖', `确定为「${groupName}」抽 1 次${poolName}吗？\n每周每组每池限一次；奖励全组每人各得一份，惩罚一条结果全组共担。`, async ()=>{
+    const r=await rpc('admin_draw_group_manual',{ p_group_name:groupName, p_pool_type:_lotPool, p_week_key:wk });
     if(r.code!==0){ toast(r.msg,'err'); return; }
     const draws=(r.data&&r.data.draws)||[];
     playLotteryAnim(_lotPool, draws, async ()=>{ await reloadData(false); renderLotDrawArea(); },
@@ -3030,12 +3066,13 @@ async function drawGroupNow(groupName){
 }
 async function batchDrawGroup(){
   const groups=Array.from(document.querySelectorAll('.lot-group-chk')).filter(b=>b.checked).map(b=>b.value);
-  if(!groups.length){ toast('请先勾选要抽选的小组','err'); return; }
+  if(!groups.length){ toast('请先勾选要抽奖的小组','err'); return; }
   const poolName=POOL_NAME[_lotPool]||_lotPool;
-  confirmDialog('批量抽选', `将对选中的 ${groups.length} 个小组各抽 1 次${poolName}，确定吗？`, async ()=>{
+  const wk=lotWeekOf();
+  confirmDialog('批量抽奖', `将对选中的 ${groups.length} 个小组各抽 1 次${poolName}（${wk} 周），确定吗？`, async ()=>{
     const results=[]; let failed=0;
     for(const g of groups){
-      const r=await rpc('draw_group_lottery',{ p_group_name:g, p_pool_type:_lotPool });
+      const r=await rpc('admin_draw_group_manual',{ p_group_name:g, p_pool_type:_lotPool, p_week_key:wk });
       if(r.code!==0){ toast(g+'：'+r.msg,'err'); failed++; continue; }
       const draws=(r.data&&r.data.draws)||[];
       const snap=draws.length?(draws[0].item_snapshot||{}):{};
@@ -3058,7 +3095,7 @@ async function renderLotIndividualArea(modeBar){
     if(c.remaining>0) byStu[k].types.push(`${POOL_NAME[c.pool_type]||c.pool_type}·${CHANCE_TYPE_NAME[c.chance_type]||c.chance_type} ${c.remaining}/${c.amount}`);
   });
   const rows=Object.values(byStu).filter(s=>s.reward+s.penalty>0).sort((a,b)=>cmpGroupName(a.group,b.group)||String(a.name||'').localeCompare(String(b.name||''),'zh'));
-  const canOperate=isTeacher()||isRecorder();
+  const canOperate=isTeacher();
   const isStu=isStudent();
   const body=rows.map(s=>{
     const cnt=_lotPool==='reward'?s.reward:s.penalty;
@@ -3076,14 +3113,14 @@ async function renderLotIndividualArea(modeBar){
   box.innerHTML=modeBar+`
     <div class="card">
       <div class="toolbar">
-        <h3 style="margin:0">个人抽选次数（${esc(d.period_key||lotPeriodOf())}）</h3>
+        <h3 style="margin:0">个人抽选次数 · ${esc(monthLabelOf(d.period_key||lotPeriodOf()))}</h3>
         ${lotPeriodBar(false)}
         ${canOperate||isStu?`<button class="btn btn-sm" onclick="toggleLotStuAll()">全选</button>
         <button class="btn btn-sm btn-primary" onclick="batchDrawIndividual()">批量抽选选中学生</button>`:''}
       </div>
       ${rows.length?`<table class="data"><thead><tr><th></th><th>学生</th><th>小组</th><th>奖励次数</th><th>惩罚次数</th><th>明细</th><th>操作</th></tr></thead><tbody>${body}</tbody></table>`
-        :`<div class="empty">本周期暂无个人抽选次数。周/月结算后会自动发放，未使用的次数会在月末自动抽选。</div>`}
-      ${isStu?'<div class="dim small" style="margin-top:10px">抽中的卡片可在左侧「我的仓库」查看与使用登记。</div>':''}
+        :`<div class="empty">本周期暂无个人抽选次数。次数在管理员执行「月度结算」时发放，未使用的次数会在结算时自动抽完。</div>`}
+      ${isStu?'<div class="dim small" style="margin-top:10px">抽中的卡片可在左侧「我的仓库」查看与使用登记。</div>':(isRecorder()?'<div class="dim small" style="margin-top:10px">个人抽选已收回记录员代抽权限，请学生本人抽选，或由执行小组及以上代抽。</div>':'')}
     </div>`;
 }
 function toggleLotStuAll(){
@@ -3197,12 +3234,12 @@ async function renderLotDraws(){
   // 个人记录按月筛选；小组集体抽选（含周结算自动抽选）按周筛选
   const isGroupDraw=x=>!!x.is_group || String(x.source||'').indexOf('weekly_group')===0;
   const wkStart=(_lotWeek?weekStartOf(_lotWeek):null);
-  const wkEnd=wkStart?new Date(wkStart.getTime()+7*86400*1000):null;
+  const wkEndExcl=(_lotWeek?weekEndExclOf(_lotWeek):null);
   const list=all.filter(x=>{
     if(isGroupDraw(x)){
       if(!wkStart) return true;
       const t=new Date(x.drawn_at);
-      return t>=wkStart && t<wkEnd;
+      return t>=wkStart && (!wkEndExcl || t<wkEndExcl);
     }
     return !_lotPeriod || String(x.period_key||'')===_lotPeriod;
   });
@@ -3211,8 +3248,8 @@ async function renderLotDraws(){
     <div class="toolbar">
       <span class="lbl">个人（月）</span>
       <select class="field" onchange="setLotPeriod(this.value)">
-        <option value=""${_lotPeriod===''?' selected':''}>全部月份</option>
-        ${lotMonths(12).map(k=>`<option value="${k}"${_lotPeriod===k?' selected':''}>${k}</option>`).join('')}
+        <option value=""${_lotPeriod===''?' selected':''}>全部</option>
+        ${monthPeriods(12).map(b=>`<option value="${esc(b.period_key)}"${_lotPeriod===b.period_key?' selected':''}>${esc(periodRangeText(b,'month'))}</option>`).join('')}
       </select>
       ${lotWeekBar(true)}
       <span class="lbl">状态</span>
@@ -3415,6 +3452,18 @@ async function renderPeriodSummary(){
     if(_sumTab==='week') await renderWeekSummaries(); else await renderSettlements();
   }catch(e){ document.getElementById('sumBody').innerHTML=`<div class="card"><div class="empty">${esc(e.message||e)}</div></div>`; }
 }
+function periodRangeText(x, type){
+  const key=(x&&x.period_key)||'';
+  const ty=type||(x&&x.type)||'';
+  if(x&&x.start_date) return x.end_date ? (fmtDay(x.start_date)+' ~ '+fmtDay(x.end_date)) : (fmtDay(x.start_date)+' ~ 进行中');
+  const b=(DB.boundaries||[]).find(b=>String(b.period_key||'')===String(key)&&String(b.type||'')===String(ty));
+  if(b){
+    const s=fmtDay(b.start_date||key);
+    return b.end_date ? (s+' ~ '+fmtDay(b.end_date)) : (s+' ~ 进行中');
+  }
+  if(x&&x.range_start&&x.range_end) return fmtDay(x.range_start)+' ~ '+fmtDay(x.range_end);
+  return key;
+}
 async function renderWeekSummaries(){
   const r=await rpc('list_weekly_summaries',{ p_limit:20 });
   if(r.code!==0){ document.getElementById('sumBody').innerHTML=`<div class="card"><div class="empty">${esc(r.msg)}</div></div>`; return; }
@@ -3426,7 +3475,7 @@ async function renderWeekSummaries(){
       <button class="btn btn-primary btn-sm" onclick="runWeeklySummary()">立即汇总上周</button>
       <span class="lbl">查看周期</span>
       <select class="field" id="sumWeekSel">
-        ${pItems.map(x=>`<option value="${esc(x.period_key)}">${esc(x.period_key)}${x.has_summary?'':'（尚无汇总）'}</option>`).join('')}
+        ${pItems.filter(x=>x.has_summary).concat(pItems.filter(x=>!x.has_summary).slice(0,2)).map(x=>`<option value="${esc(x.period_key)}">${esc(periodRangeText(x,'week'))}${x.has_summary?'':'（尚无汇总）'}</option>`).join('')}
       </select>
       <button class="btn btn-sm" onclick="viewPeriodSummary('week')">查看该周期</button>
       <button class="btn btn-sm btn-primary" onclick="resumPeriod('week')">重新汇总该周期</button>
@@ -3434,7 +3483,7 @@ async function renderWeekSummaries(){
     </div></div>` : `<div class="card"><div class="toolbar">
       <span class="lbl">查看周期</span>
       <select class="field" id="sumWeekSel">
-        ${pItems.filter(x=>x.has_summary).map(x=>`<option value="${esc(x.period_key)}">${esc(x.period_key)}</option>`).join('')||'<option value="">暂无</option>'}
+        ${pItems.filter(x=>x.has_summary).map(x=>`<option value="${esc(x.period_key)}">${esc(periodRangeText(x,'week'))}</option>`).join('')||'<option value="">暂无</option>'}
       </select>
       <button class="btn btn-sm" onclick="viewPeriodSummary('week')">查看该周期</button>
     </div></div>`;
@@ -3444,8 +3493,8 @@ async function renderWeekSummaries(){
     const groups=(s.groups||[]);
     const inds=(s.individuals||[]);
     return `<div class="card">
-      <div class="toolbar"><h3 style="margin:0">${esc(w.period_key||'')}</h3>
-        <span class="dim small">${esc(fmtDay(w.range_start))} ~ ${esc(fmtDay(w.range_end))}</span>
+      <div class="toolbar"><h3 style="margin:0">${esc(fmtDay(w.range_start))} ~ ${esc(fmtDay(w.range_end))}</h3>
+        <span class="dim small">周期 ${esc(w.period_key||'')}</span>
         <span class="pill">快照${s.effects_done?'·已结算':'·仅快照'}</span>
         ${isTeacher()?`<button class="btn btn-sm btn-ghost" onclick="runWeeklySummary('${esc(w.boundary_id||'')}')">重新汇总</button>`:''}</div>
       ${student?`
@@ -3466,14 +3515,22 @@ async function renderWeekSummaries(){
           </div>
         </div>
         <div class="dim small">奖励小组：${(s.reward_groups||[]).map(g=>g.group_name||g).join('、')||'无'}　｜　惩罚小组：${(s.penalty_groups||[]).map(g=>g.group_name||g).join('、')||'无'}</div>
-        <div class="dim small">本周发放：集体奖励抽选 ${esc(String(s.reward_group_chances||0))} 次　｜　小组惩罚抽选 ${esc(String(s.penalty_group_chances||0))} 次</div>`}
+        <div class="dim small">建议奖励小组：${esc(((s.reward_groups||[]).map(g=>g.group_name).join('、'))||'无')}　｜　建议惩罚小组：${esc(((s.penalty_groups||[]).map(g=>g.group_name).join('、'))||'无')}　｜　抽奖请到「奖惩抽选 → 小组（集体）」由执行小组及以上手动进行</div>`}
       </div>`;
-  }).join('') : `<div class="card"><div class="empty">暂无周汇总。每周分隔点到点后由系统自动生成。</div></div>`);
+  }).join('') : `<div class="card"><div class="empty">暂无周汇总。由管理员点「立即汇总上周」生成（系统不自动汇总）。</div></div>`);
+}
+function monthPeriodLabel(key){
+  const b=(DB.boundaries||[]).find(x=>String(x.type||'')==='month'&&String(x.period_key||'')===String(key||''));
+  if(!b) return String(key||'');
+  const s=fmtDay(b.start_date||key);
+  return b.end_date ? (s+' ~ '+fmtDay(b.end_date)) : (s+' · 进行中');
 }
 async function renderSettlements(){
   const r=await rpc('list_settlements',{ p_limit:20 });
   if(r.code!==0){ document.getElementById('sumBody').innerHTML=`<div class="card"><div class="empty">${esc(r.msg)}</div></div>`; return; }
-  const list=Array.isArray(r.data)?r.data:((r.data&&r.data.items)||[]);
+  const listAll=Array.isArray(r.data)?r.data:((r.data&&r.data.items)||[]);
+  // 已回滚（被手动重新结算覆盖）的记录不再展示，避免同一月份堆多张卡片
+  const list=listAll.filter(s=>s.status!=='rolled_back');
   const statusName={done:['已完成','badge-ok'],running:['进行中','badge-warn'],failed:['失败','badge-danger'],rolled_back:['已回滚','badge-dim']};
   const mperiodsR=await rpc('list_summary_periods',{ p_type:'month', p_limit:60 });
   const mItems=(mperiodsR.code===0&&mperiodsR.data&&mperiodsR.data.items)||[];
@@ -3483,11 +3540,11 @@ async function renderSettlements(){
         ${isTeacher()?`<button class="btn btn-primary btn-sm" onclick="runMonthlySummary()">立即结算上月</button>`:''}
         <span class="lbl">查看周期</span>
         <select class="field" id="sumMonthSel">
-          ${mItems.filter(x=>isTeacher()||x.has_summary).map(x=>`<option value="${esc(x.period_key)}">${esc(x.period_key)}${x.has_summary?'':'（尚无结算）'}</option>`).join('')}
+          ${mItems.filter(x=>!x.boundary_at).concat(mItems.filter(x=>x.has_summary)).concat(mItems.filter(x=>!x.has_summary&&x.boundary_at).slice(0,2)).map(x=>`<option value="${esc(x.period_key)}">${esc(periodRangeText(x,'month'))}${x.has_summary?'':'（尚无结算）'}</option>`).join('')}
         </select>
         <button class="btn btn-sm" onclick="viewPeriodSummary('month')">查看该周期</button>
         ${isTeacher()?`<button class="btn btn-sm btn-primary" onclick="resumPeriod('month')">重新结算该周期</button>`:''}
-        <span class="dim small">月度结算在每月分隔点自动执行；结算后上月积分冻结、次数清零。可回看任意过去月份。</span>
+        <span class="dim small">结算不自动执行：由管理员点「立即结算上月」触发；结算后上月积分冻结、次数清零。可回看任意过去月份。</span>
       </div>
     </div>`;
   const cards = list.map(s=>{
@@ -3496,9 +3553,11 @@ async function renderSettlements(){
     const sm=s.summary||{};
     const rw=((sm.reward&&sm.reward.rows)||[]).length;
     const pn=((sm.penalty&&sm.penalty.rows)||[]).length;
+    const rsum=((sm.reward&&sm.reward.rows)||[]).reduce((a,x)=>a+Number(x.amount||0),0);
+    const psum=((sm.penalty&&sm.penalty.rows)||[]).reduce((a,x)=>a+Number(x.amount||0),0);
     return `<div class="card">
       <div class="toolbar">
-        <h3 style="margin:0">${esc(s.period_key||'')} 月度结算</h3>
+        <h3 style="margin:0">${esc(monthPeriodLabel(s.period_key))} 月度结算</h3>
         <span class="badge-status ${st[1]}">${st[0]}</span>
         <span class="dim small">完成于 ${s.finished_at?esc(fmtDateTime(s.finished_at)):'—'}</span>
         <span style="flex:1"></span>
@@ -3508,11 +3567,18 @@ async function renderSettlements(){
       <div class="grid-2">
         <div class="kv"><span>自动抽选</span><b>${esc(String(s.auto_draw_count||0))} 次</b></div>
         <div class="kv"><span>奖励人数 / 惩罚人数</span><b>${rw} / ${pn}</b></div>
+        <div class="kv"><span>奖励次数 / 惩罚次数</span><b>${rsum} / ${psum}</b></div>
       </div>
       <div class="dim small">按排名惩罚名单：${sc.length?esc(sc.map(x=>x.name||x.student_name||'').join('、')):'无'}</div>
     </div>`;
   }).join('');
   document.getElementById('sumBody').innerHTML = head + (cards || `<div class="card"><div class="empty">暂无月度结算记录</div></div>`);
+  // 下拉默认选中「最近一个有结算的月」，避免默认停在「进行中（尚无结算）」上
+  const msel=document.getElementById('sumMonthSel');
+  if(msel && msel.options.length){
+    const hit=[...msel.options].find(o=>!o.textContent.includes('尚无结算'));
+    if(hit) msel.value=hit.value;
+  }
 }
 async function viewPeriodSummary(type){
   const sel=document.getElementById(type==='week'?'sumWeekSel':'sumMonthSel');
@@ -3540,11 +3606,8 @@ async function viewPeriodSummary(type){
       <h3>${esc(key)} 月度结算</h3>
       <div class="kv"><span>状态</span><b>${esc(d.status||'')}</b></div>
       <div class="kv"><span>自动抽选</span><b>${esc(String(d.auto_draw_count||0))} 次</b></div>
-      <div class="kv"><span>按排名惩罚名单</span><b>${esc(((d.second_class||[]).map(x=>x.name||x.student_name||'').join('、'))||'无')}</b></div>
-      <div class="sub-title">奖励次数（${rowsOf(sm.reward).length} 人）</div>
-      <div class="dim small">${rowsOf(sm.reward).map(x=>esc(x.name||'')+':'+esc(String(x.amount||0))).join('　')||'无'}</div>
-      <div class="sub-title">惩罚次数（${rowsOf(sm.penalty).length} 人）</div>
-      <div class="dim small">${rowsOf(sm.penalty).map(x=>esc(x.name||'')+':'+esc(String(x.amount||0))).join('　')||'无'}</div>
+      ${nameListHtml(d.second_class)}
+      ${settlementTablesHtml(sm)}
       <div class="modal-actions"><button class="btn" onclick="closeModal()">关闭</button></div>`);
   }
 }
@@ -3587,19 +3650,51 @@ function runMonthlyByKey(monthKey){
   if(!bd){ toast('找不到该月的分隔点记录，无法重算','err'); return; }
   runMonthlySummary(bd.id);
 }
+function nameListHtml(sc){
+  const names=((sc||[]).map(x=>x.name||x.student_name||'')).filter(Boolean);
+  return `<div class="sub-title">按排名惩罚名单（${names.length} 人）</div>
+    <div class="dim small">${esc(names.join('、')||'无')}</div>`;
+}
+function settlementTablesHtml(sm){
+  const rowsOf=(x)=>(x&&x.rows)||[];
+  const cmp=(a,b)=>Number(b.amount||0)-Number(a.amount||0)||String(a.name||'').localeCompare(String(b.name||''),'zh');
+  const reward=rowsOf(sm.reward).slice().sort(cmp);
+  const penalty=rowsOf(sm.penalty).slice().sort(cmp);
+  const rT=reward.reduce((a,x)=>a+Number(x.amount||0),0);
+  const pT=penalty.reduce((a,x)=>a+Number(x.amount||0),0);
+  const rewardHtml=`<div class="sub-title">奖励明细（${reward.length} 人，共 ${rT} 次）</div>
+    <div class="table-wrap" style="max-height:240px">
+      <table class="data data-compact">
+        <thead><tr><th>#</th><th>姓名</th><th>合计</th><th>排名前15</th><th>净分追加</th></tr></thead>
+        <tbody>${reward.map((x,i)=>`<tr><td>${i+1}</td><td>${esc(x.name||'')}</td><td>${Number(x.amount||0)}</td><td>${Number(x.top15_bonus||0)?'+'+Number(x.top15_bonus||0):'—'}</td><td>${Number(x.net_bonus||0)?'+'+Number(x.net_bonus||0):'—'}</td></tr>`).join('')||'<tr><td colspan="5">无</td></tr>'}</tbody>
+      </table>
+    </div>`;
+  const penaltyHtml=`<div class="sub-title">惩罚明细（${penalty.length} 人，共 ${pT} 次）</div>
+    <div class="table-wrap" style="max-height:240px">
+      <table class="data data-compact">
+        <thead><tr><th>#</th><th>姓名</th><th>合计</th><th>负分基础</th><th>名单追加</th><th>在名单</th></tr></thead>
+        <tbody>${penalty.map((x,i)=>`<tr><td>${i+1}</td><td>${esc(x.name||'')}</td><td>${Number(x.amount||0)}</td><td>${Number(x.base_amount||0)||'—'}</td><td>${Number(x.rank_amount||0)?'+'+Number(x.rank_amount||0):'—'}</td><td>${x.in_list?'是':'否'}</td></tr>`).join('')||'<tr><td colspan="6">无</td></tr>'}</tbody>
+      </table>
+    </div>`;
+  return rewardHtml+penaltyHtml;
+}
 function showSettlement(s){
+  const stMap={done:'已完成',running:'进行中',failed:'失败',rolled_back:'已回滚'};
   const sm=s.summary||{};
   const rowsOf=(x)=>(x&&x.rows)||[];
   const reward=rowsOf(sm.reward), penalty=rowsOf(sm.penalty);
+  const rT=reward.reduce((a,x)=>a+Number(x.amount||0),0);
+  const pT=penalty.reduce((a,x)=>a+Number(x.amount||0),0);
   openModal(`
     <h3>${esc(s.period_key||'')} 月度结算</h3>
-    <div class="kv"><span>状态</span><b>${esc(s.status)}</b></div>
-    <div class="kv"><span>自动抽选</span><b>${esc(String(s.auto_draw_count||0))} 次</b></div>
-    <div class="kv"><span>按排名惩罚名单</span><b>${esc(((s.second_class||[]).map(x=>x.name||x.student_name||'').join('、'))||'无')}</b></div>
-    <div class="sub-title">奖励次数（${reward.length} 人）</div>
-    <div class="dim small">${reward.map(x=>`${esc(x.name||'')}:${esc(String(x.amount||0))}`).join('　')||'无'}</div>
-    <div class="sub-title">惩罚次数（${penalty.length} 人）</div>
-    <div class="dim small">${penalty.map(x=>`${esc(x.name||'')}:${esc(String(x.amount||0))}`).join('　')||'无'}</div>
+    <div class="grid-2">
+      <div class="kv"><span>状态</span><b>${esc(stMap[s.status]||String(s.status||''))}</b></div>
+      <div class="kv"><span>完成时间</span><b>${s.finished_at?esc(fmtDateTime(s.finished_at)):'—'}</b></div>
+      <div class="kv"><span>自动抽选</span><b>${esc(String(s.auto_draw_count||0))} 次</b></div>
+      <div class="kv"><span>奖励 / 惩罚</span><b>${reward.length} 人 ${rT} 次 / ${penalty.length} 人 ${pT} 次</b></div>
+    </div>
+    ${nameListHtml(s.second_class)}
+    ${settlementTablesHtml(sm)}
     <div class="modal-actions"><button class="btn" onclick="closeModal()">关闭</button></div>`);
 }
 async function resettle(monthKey){
@@ -3641,48 +3736,24 @@ function renderSettings(){
     ${pageHeader('设置', 'V'+APP_VERSION)}
     <div class="settings-card">
       <h3>当前周期</h3>
-      <div class="kv"><span>周：</span><b>${esc((APP.period||{}).week_key||'-')}</b>
-        <span>月：</span><b>${esc((APP.period||{}).month_key||'-')}</b>
-        <span>下个周分隔点：</span><b>${esc((APP.period||{}).next_week_at?fmtDateTime(APP.period.next_week_at):'-')}</b>
-        <span>下个月分隔点：</span><b>${esc((APP.period||{}).next_month_at?fmtDateTime(APP.period.next_month_at):'-')}</b></div>
-      <div class="desc">周分隔规则：${esc(dowNames[wk.dow]||'周一')} ${String(wk.hour||0).padStart(2,'0')}:${String(wk.minute||0).padStart(2,'0')}　｜　
-        月分隔规则：每月 ${mo.dom||1} 日 ${String(mo.hour||0).padStart(2,'0')}:${String(mo.minute||0).padStart(2,'0')}（东八区）</div>
-      ${monthBoundary?`<div class="desc">已冻结月份：${esc(fmtDateTime(monthBoundary.boundary_at))} 之前（该月及更早记录不可改）</div>`:''}
+      <div class="kv">${(()=>{const bs=DB.boundaries||[];
+        const today=new Date(Date.now()+8*3600*1000).toISOString().slice(0,10);
+        const cw=bs.filter(b=>b.type==='week'&&String(b.start_date)<=today&&(!b.end_date||String(b.end_date)>=today))[0];
+        const cm=bs.filter(b=>b.type==='month'&&String(b.start_date)<=today&&(!b.end_date||String(b.end_date)>=today))[0];
+        const nw=bs.filter(b=>b.type==='week'&&String(b.start_date)>today).sort((x,y)=>String(x.start_date).localeCompare(String(y.start_date)))[0];
+        return `
+        <span>本周：</span><b>${cw?esc(fmtDay2(cw.start_date)+' ~ '+fmtDay2(cw.end_date)):'未定义'}</b>
+        <span>本月：</span><b>${cm?esc(fmtDay2(cm.start_date)+' ~ '+(cm.end_date?fmtDay2(cm.end_date):'进行中')):'未定义'}</b>
+        <span>下一周：</span><b>${nw?esc(fmtDay2(nw.start_date)+' ~ '+fmtDay2(nw.end_date)):'未定义'}</b>
+        <span>规则计分周：</span><b>${cw?(cw.rule_weeks||1):1}</b>`;})()}</div>
+      <div class="desc">周期由「设置 → 周期定义（周 / 月）」手动维护；周首尾相接，月的起止必须落在周边界上。</div>
+      ${monthBoundary?`<div class="desc">已冻结月份：${esc(fmtDay2(monthBoundary.end_date))} 及更早的记录不可改</div>`:''}
       ${APP.maintenance?`<div class="readonly-mask">系统维护中：全站只读${(APP.period||{}).maintenance_until?('，预计 '+esc(fmtDateTime(APP.period.maintenance_until))+' 恢复'):''}</div>`:''}
     </div>
 
     ${passwordCardHtml()}
 
     ${canCfg?`
-    <div class="settings-card">
-      <h3>时间规则（周/月分隔点）</h3>
-      <div class="form-row">
-        <label style="min-width:0">按规则自动生成分隔点</label>
-        <label class="dim small" style="display:flex;align-items:center;gap:6px">
-          <input type="checkbox" id="cfAutoBd" ${(cfg.auto_boundaries===false)?'':'checked'} onchange="saveAutoBoundaries(this.checked)">
-          <span>${(cfg.auto_boundaries===false)?'已关闭：不再预生成未来分隔点，只能手动新增':'已开启：按规则预生成未来 12 个月分隔点'}</span>
-        </label>
-      </div>
-      <div class="desc">修改后会自动清理“未来的、未结算的”自动分隔点并按新规则重建；已过去或已结算的历史周期不受影响。关闭自动生成后，保存规则只更新配置、不动已有分隔点。</div>
-      <div class="form-row">
-        <label>周分隔</label>
-        <select class="field" id="cfDow">${[1,2,3,4,5,6,7].map(d=>`<option value="${d}" ${(+wk.dow===d)?'selected':''}>${dowNames[d]}</option>`).join('')}</select>
-        <input class="input" id="cfWeekHour" type="number" min="0" max="23" value="${wk.hour||0}" style="width:80px"> 时
-        <input class="input" id="cfWeekMin" type="number" min="0" max="59" value="${wk.minute||0}" style="width:80px"> 分
-      </div>
-      <div class="form-row">
-        <label>月分隔</label>
-        <input class="input" id="cfDom" type="number" min="1" max="28" value="${mo.dom||1}" style="width:80px"> 日
-        <input class="input" id="cfMonthHour" type="number" min="0" max="23" value="${mo.hour||0}" style="width:80px"> 时
-        <input class="input" id="cfMonthMin" type="number" min="0" max="59" value="${mo.minute||0}" style="width:80px"> 分
-        <label style="min-width:0">维护时长</label>
-        <input class="input" id="cfMaintMin" type="number" min="0" max="180" value="${cfg.maintenance_minutes||30}" style="width:80px"> 分钟
-      </div>
-      <div class="row-actions">
-        <button class="btn btn-primary" onclick="saveSeparatorRules()">保存时间规则</button>
-        <button class="btn btn-ghost" onclick="regenerateBoundaries()">重建未来分隔点</button>
-      </div>
-    </div>
 
     <div class="settings-card">
       <h3>维护与应急</h3>
@@ -3692,6 +3763,11 @@ function renderSettings(){
         <input class="input" id="cfMaintUntil" type="datetime-local">
         <span class="dim small">留空则按「维护时长」自动计算（默认 30 分钟）；也可直接指定结束时间，最长 7 天。</span>
       </div>
+      <div class="form-row">
+        <label>维护时长</label>
+        <input class="input" id="cfMaintMin" type="number" min="0" max="180" value="${cfg.maintenance_minutes||30}" style="width:80px"> 分钟
+        <span class="dim small">开启维护但未填结束时间时使用</span>
+      </div>
       <div class="row-actions">
         ${APP.maintenance
           ? `<button class="btn btn-danger" onclick="toggleMaintenance(false)">立即结束维护</button>`
@@ -3700,60 +3776,41 @@ function renderSettings(){
     </div>
 
     <div class="settings-card">
-      <h3>分隔点管理</h3>
-      <div class="desc">新增 / 编辑 / 批量删除分隔点；已到点但未结算的也能编辑时间（编辑后周期键会自动重算）。「立即分隔」会马上按当前时间生成分隔点并立刻执行结算作业。</div>
-      <div class="form-row">
-        <select class="field" id="bdType">
-          <option value="week">周分隔点</option>
-          <option value="month">月分隔点</option>
-          <option value="rule_update">规则分隔点</option>
-        </select>
-        <input class="input" id="bdAt" type="datetime-local">
-        <input class="input" id="bdLabel" placeholder="标签（选填）" style="min-width:160px">
-        <button class="btn btn-success" onclick="addBoundary()">新增分隔点</button>
+      <h3>周期定义（周 / 月）</h3>
+      <div class="desc">周与月都用「起止日期」定义。周首尾相接、可跨自然月；月的起止必须落在周边界上（月不劈开某周）。月分两步：先设开始日期，结束时填结束日期，结束日次日自动成为下个月开始。规则计分周 = 该周按几个计分周期计算登记上限（默认 1，填 2 则上限翻倍）。</div>
+
+      <div class="form-row" style="align-items:flex-end">
+        <div><label class="dim small">周开始（必须是周一或接上一周的次日）</label><br><input class="input" id="pdWkStart" type="date" style="width:150px"></div>
+        <div><label class="dim small">周结束</label><br><input class="input" id="pdWkEnd" type="date" style="width:150px"></div>
+        <div><label class="dim small">规则计分周</label><br><input class="input" id="pdWkRule" type="number" min="1" max="4" value="1" style="width:90px"></div>
+        <button class="btn btn-success" onclick="saveWeekPeriod()">保存周周期</button>
+        <span class="dim small">留空结束日 = 自动 +6 天</span>
       </div>
-      <div class="form-row">
-        <span class="dim small">立即分隔：</span>
-        <button class="btn btn-sm btn-primary" onclick="createImmediateBoundary('week')">立即周分隔</button>
-        <button class="btn btn-sm btn-primary" onclick="createImmediateBoundary('month')">立即月分隔</button>
-        <button class="btn btn-sm btn-ghost" onclick="createImmediateBoundary('rule_update')">立即规则分隔</button>
+
+      <div class="form-row" style="align-items:flex-end">
+        <div><label class="dim small">月开始（必须等于某一周的开始）</label><br><input class="input" id="pdMoStart" type="date" style="width:150px"></div>
+        <div><label class="dim small">月结束（留空 = 进行中）</label><br><input class="input" id="pdMoEnd" type="date" style="width:150px"></div>
+        <button class="btn btn-primary" onclick="startMonth()">设置月开始</button>
+        <button class="btn btn-outline-danger" onclick="closeMonth()">结束当前月</button>
       </div>
-      <div class="desc" style="color:var(--text-2)">规则分隔点只把「同一周期内的积分登记次数/分值上限」重新计数，不做任何汇总；适合一个自然周期内要分多轮登记上限的情况。</div>
-      <div class="toolbar">
-        <select class="field" id="bdFilter" onchange="setBdFilter(this.value)" style="width:150px">
-          <option value="all" ${_bdFilter==='all'?'selected':''}>全部分隔点</option>
-          <option value="unsettled" ${_bdFilter==='unsettled'?'selected':''}>只看未结算</option>
-          <option value="settled" ${_bdFilter==='settled'?'selected':''}>只看已结算</option>
-        </select>
-        <button class="btn btn-sm" onclick="toggleBdAll()">全选/取消</button>
-        <button class="btn btn-sm btn-outline-danger" onclick="deleteBoundariesBatch()">批量删除选中</button>
-        <span class="dim small">勾选范围只作用于当前筛选结果；已结算的分隔点也可删除（会一并清掉其周汇总/月结算快照）；当前周与当前月的分隔点不能删。</span>
+
+      <div class="row-actions">
+        <button class="btn btn-sm" onclick="validatePeriods()">检查周期一致性</button>
+        <button class="btn btn-sm" onclick="reloadData(false).then(()=>renderSettings())">刷新</button>
+        <span class="dim small">新增/修改后请检查一次；有空洞或月不落在周界会提示具体问题。</span>
       </div>
-      ${(()=>{const nowMs=Date.now();
-      const bdAll=(DB.boundaries||[]).filter(b=>{
-        if(_bdFilter==='settled' && !b.settled) return false;
-        if(_bdFilter==='unsettled' && b.settled) return false;
-        return _bdFilter!=='all' || !b.settled || new Date(b.boundary_at)>new Date(nowMs-90*864e5);
-      });
-      const future=bdAll.filter(b=>new Date(b.boundary_at).getTime()>=nowMs).sort((x,y)=>new Date(x.boundary_at)-new Date(y.boundary_at));
-      const past=bdAll.filter(b=>new Date(b.boundary_at).getTime()<nowMs).sort((x,y)=>new Date(y.boundary_at)-new Date(x.boundary_at));
-      const bdList=future.concat(past).slice(0,60);
-      return `<div class="table-wrap"><table class="data data-compact">
-          <thead><tr><th></th><th>类型</th><th>时间</th><th>周期键 / 标签</th><th>状态</th><th>操作</th></tr></thead>
-          <tbody>${bdList.length?bdList.map(b=>`
-            <tr>
-              <td><input type="checkbox" class="bd-chk" value="${esc(b.id)}"></td>
-              <td>${b.type==='week'?'周':(b.type==='month'?'月':'规则')}</td>
-              <td class="nowrap">${esc(fmtDateTime(b.boundary_at))}</td>
-              <td>${esc(b.period_key||'')} <span class="dim small">${esc(b.label||'')}</span>${b.is_manual?' <span class="badge-status">手动</span>':''}</td>
-              <td>${b.settled?'<span class="pill pill-ok">已结算</span>':'<span class="pill">未结算</span>'}</td>
-              <td class="nowrap">
-                <button class="btn btn-mini" onclick="editBoundary('${esc(b.id)}')">编辑</button>
-                <button class="btn btn-mini btn-outline-danger" onclick="deleteBoundary('${esc(b.id)}')">删除</button>
-              </td>
-            </tr>`).join(''):'<tr><td colspan="6" class="empty">没有可显示的分隔点</td></tr>'}</tbody>
-        </table></div>`;})()}
-    </div>
+
+      <div class="sub-title">最近周周期</div>
+      <div class="table-wrap"><table class="data data-compact">
+        <thead><tr><th>开始</th><th>结束</th><th>规则计分周</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody>${periodRowsHtml('week')}</tbody>
+      </table></div>
+
+      <div class="sub-title">最近月周期</div>
+      <div class="table-wrap"><table class="data data-compact">
+        <thead><tr><th>开始</th><th>结束</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody>${periodRowsHtml('month')}</tbody>
+      </table></div>
 
     <div class="settings-card">
       <h3>学生可见与注册配置</h3>
@@ -3826,110 +3883,70 @@ function renderSettings(){
     </div>`;
 }
 
-async function saveSeparatorRules(){
-  const week={ dow:+document.getElementById('cfDow').value, hour:+document.getElementById('cfWeekHour').value||0, minute:+document.getElementById('cfWeekMin').value||0 };
-  const month={ dom:+document.getElementById('cfDom').value, hour:+document.getElementById('cfMonthHour').value||0, minute:+document.getElementById('cfMonthMin').value||0 };
-  const minutes=+document.getElementById('cfMaintMin').value||30;
-  if(month.dom<1||month.dom>28){ toast('月分隔日需在 1–28 之间','err'); return; }
-  const r=await rpc('admin_save_separator_rules', { p_week:week, p_month:month, p_maintenance_minutes:minutes });
+
+function fmtDay2(v){ if(!v) return '—'; const s=String(v).slice(0,10); const parts=s.split('-'); return parts.length===3 ? (parts[0]+'-'+(+parts[1])+'-'+(+parts[2])) : s; }
+function periodRowsHtml(type){
+  const all=(DB.boundaries||[]).filter(b=>b.type===type);
+  const now=new Date(Date.now()+8*3600*1000).toISOString().slice(0,10);
+  const rows=all.slice().sort((x,y)=>String(x.start_date).localeCompare(String(y.start_date)));
+  const today=rows.filter(r=>String(r.start_date)<=now && (!r.end_date || String(r.end_date)>=now));
+  const past=rows.filter(r=>r.end_date && String(r.end_date)<now).slice(-6);
+  const future=rows.filter(r=>String(r.start_date)>now).slice(0,3);
+  const show=past.concat(today).concat(future);
+  if(!show.length) return '<tr><td colspan="5" class="empty">还没有周期，请先设置周与月</td></tr>';
+  return show.map(r=>{
+    const ongoing=!r.end_date;
+    const cur=today.includes(r);
+    const st=ongoing?'<span class="pill pill-warn">进行中</span>':(r.settled?'<span class="pill pill-ok">已结算</span>':'<span class="pill">未结算</span>');
+    const canDel=!(cur || r.settled);
+    const ops=`${canDel?`<button class="btn btn-mini btn-outline-danger" onclick="deletePeriod('${esc(r.id)}')">删除</button>`:''}`;
+    if(type==='week') return `<tr><td class="nowrap">${esc(fmtDay2(r.start_date))}${cur?' <span class="badge-status">本周</span>':''}</td><td class="nowrap">${esc(fmtDay2(r.end_date))}</td><td>${r.rule_weeks||1}</td><td>${st}</td><td class="nowrap">${ops}</td></tr>`;
+    return `<tr><td class="nowrap">${esc(fmtDay2(r.start_date))}${cur?' <span class="badge-status">本月</span>':''}</td><td class="nowrap">${esc(fmtDay2(r.end_date))}</td><td>${st}</td><td class="nowrap">${ops}</td></tr>`;
+  }).join('');
+}
+async function saveWeekPeriod(){
+  const s=(document.getElementById('pdWkStart').value||'').trim();
+  const e=(document.getElementById('pdWkEnd').value||'').trim();
+  const rw=+document.getElementById('pdWkRule').value||1;
+  if(!s){ toast('请选择周开始日期','err'); return; }
+  const r=await rpc('admin_set_period', { p_type:'week', p_start:s, p_end:e||null, p_rule_weeks:rw });
   if(r.code!==0){ toast(r.msg,'err'); return; }
-  toast('时间规则已保存','ok');
+  toast('周周期已保存','ok');
   await reloadData(false); await refreshPeriodState(); await loadAppState(); renderSettings();
 }
-
-async function regenerateBoundaries(){
-  const r=await rpc('admin_regenerate_boundaries', {});
+async function startMonth(){
+  const s=(document.getElementById('pdMoStart').value||'').trim();
+  const e=(document.getElementById('pdMoEnd').value||'').trim();
+  if(!s){ toast('请选择月开始日期','err'); return; }
+  const r=await rpc('admin_set_period', { p_type:'month', p_start:s, p_end:e||null, p_rule_weeks:1 });
   if(r.code!==0){ toast(r.msg,'err'); return; }
-  toast('已按当前规则重建未来分隔点','ok');
-  await reloadData(false); renderSettings();
+  toast(e?'月周期已保存':'月周期已开始（进行中）','ok');
+  await reloadData(false); await refreshPeriodState(); await loadAppState(); renderSettings();
 }
-
-async function addBoundary(){
-  const type=document.getElementById('bdType').value;
-  const at=document.getElementById('bdAt').value;
-  const label=document.getElementById('bdLabel').value.trim()||null;
-  if(!at){ toast('请选择分隔点时间','err'); return; }
-  const r=await rpc('admin_add_boundary', { p_type:type, p_boundary_at:new Date(at).toISOString(), p_label:label });
-  if(r.code!==0){ toast(r.msg,'err'); return; }
-  toast('分隔点已新增','ok');
-  await reloadData(false); renderSettings();
-}
-
-function deleteBoundary(id){
-  confirmDialog('确认删除','确定删除这个分隔点吗？\n\n若该分隔点已结算，其对应的周汇总/月度结算快照会一并删除（不可恢复）；当前周与当前月的分隔点不能删除。', async ()=>{
-    const r=await rpc('admin_delete_boundaries', { p_ids:[id] });
+async function closeMonth(){
+  const e=(document.getElementById('pdMoEnd').value||'').trim();
+  confirmDialog('结束当前月','确定结束当前进行中的月周期吗？'+(e?('\n结束日期：'+e):('\n结束日期默认取本周的最后一天'))+'\n\n结束后会自动生成下一个月。', async ()=>{
+    const r=await rpc('admin_close_period', { p_end:e||null });
     if(r.code!==0){ toast(r.msg,'err'); return; }
-    const d=(r.data&&r.data.deleted)||0, sk=(r.data&&r.data.skipped)||[];
-    if(!d && sk.length){ toast('未删除：'+sk[0].reason,'err'); return; }
-    const cs=(r.data&&r.data.cascaded_summaries)||0, ct=(r.data&&r.data.cascaded_settlements)||0;
-    toast('分隔点已删除'+(cs||ct?('（同时清理周汇总 '+cs+' 条、月度结算 '+ct+' 条）'):''),'ok');
-    await reloadData(false); renderSettings();
-  });
-}
-function toggleBdAll(){
-  const boxes=Array.from(document.querySelectorAll('.bd-chk'));
-  const all=boxes.length && boxes.every(b=>b.checked);
-  boxes.forEach(b=>{ b.checked=!all; });
-}
-async function deleteBoundariesBatch(){
-  const ids=Array.from(document.querySelectorAll('.bd-chk')).filter(b=>b.checked).map(b=>b.value);
-  if(!ids.length){ toast('请先勾选要删除的分隔点','err'); return; }
-  confirmDialog('批量删除分隔点','确定删除选中的 '+ids.length+' 个分隔点吗？\n\n已结算的也可删除，但其周汇总/月度结算快照会一并删除；当前周/当前月的会被跳过。', async ()=>{
-    const r=await rpc('admin_delete_boundaries', { p_ids:ids });
-    if(r.code!==0){ toast(r.msg,'err'); return; }
-    const d=(r.data&&r.data.deleted)||0;
-    const sk=(r.data&&r.data.skipped)||[];
-    const cs=(r.data&&r.data.cascaded_summaries)||0, ct=(r.data&&r.data.cascaded_settlements)||0;
-    const tail=(cs||ct?('（清理周汇总 '+cs+' 条、月度结算 '+ct+' 条）'):'');
-    if(sk.length){ toast('已删除 '+d+' 个'+tail+'，跳过 '+sk.length+' 个：'+sk[0].reason,'warn'); } else { toast('已删除 '+d+' 个分隔点'+tail,'ok'); }
-    await reloadData(false); renderSettings();
-  });
-}
-let _bdFilter='all';
-function setBdFilter(v){ _bdFilter=v||'all'; renderSettings(); }
-function editBoundary(id){
-  const b=(DB.boundaries||[]).find(x=>String(x.id)===String(id));
-  if(!b){ toast('分隔点不存在','err'); return; }
-  const local=(()=>{ const d=new Date(b.boundary_at); const p=n=>String(n).padStart(2,'0'); return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes()); })();
-  openModal(`
-    <h3>编辑分隔点</h3>
-    <div class="modal-field"><label>类型</label><input class="field" value="${b.type==='week'?'周分隔点':(b.type==='month'?'月分隔点':'规则分隔点')}" disabled></div>
-    <div class="modal-field"><label>分隔时间（可改成过去时间）</label><input class="field" id="ebAt" type="datetime-local" value="${local}"></div>
-    <div class="modal-field"><label>标签</label><input class="field" id="ebLabel" value="${esc(b.label||'')}"></div>
-    <div class="dim small">保存后周期键会按新时间自动重算；如果该分隔点已有汇总记录，历史汇总不会被自动重算，可到「周期汇总」里重新汇总。</div>
-    <div class="modal-actions">
-      <button class="btn btn-ghost" onclick="closeModal()">取消</button>
-      <button class="btn btn-primary" onclick="saveBoundaryEdit('${esc(id)}')">保存</button>
-    </div>`);
-}
-async function saveBoundaryEdit(id){
-  const at=document.getElementById('ebAt').value;
-  const label=document.getElementById('ebLabel').value.trim()||null;
-  if(!at){ toast('请选择分隔时间','err'); return; }
-  const r=await rpc('admin_edit_boundary', { p_id:id, p_boundary_at:new Date(at).toISOString(), p_label:label });
-  if(r.code!==0){ toast(r.msg,'err'); return; }
-  closeModal();
-  if(r.data&&r.data.hint){ toast(r.data.hint,'warn'); } else { toast('分隔点已更新','ok'); }
-  await reloadData(false); renderSettings();
-}
-async function createImmediateBoundary(type){
-  const name={week:'周',month:'月',rule_update:'规则周期'}[type]||type;
-  const tip={week:'将立即生成周汇总，并按小组排名发放集体抽选次数。',
-             month:'将立即执行月度结算：进入维护模式、发放/清零次数、自动抽选未用次数。',
-             rule_update:'只重置积分登记的次数/分值上限计数，不生成任何汇总。'}[type]||'';
-  confirmDialog('立即'+name+'分隔','确定现在立即建立'+name+'分隔点吗？\n'+tip, async ()=>{
-    const r=await rpc('admin_create_immediate_boundary', { p_type:type });
-    if(r.code!==0){ toast(r.msg,'err'); return; }
-    toast((r.data&&r.data.message)||'已立即分隔','ok');
+    toast('已结束当前月并生成下一个月','ok');
     await reloadData(false); await refreshPeriodState(); await loadAppState(); renderSettings();
   });
 }
-
-async function saveAutoBoundaries(on){
-  const r=await rpc('admin_set_auto_boundaries', { p_on:!!on });
-  if(r.code!==0){ toast(r.msg,'err'); await reloadData(false); renderSettings(); return; }
-  toast(on?'已开启：按规则自动生成未来分隔点':'已关闭：不再自动生成未来分隔点', 'ok');
-  await reloadData(false); await loadAppState(); renderSettings();
+async function validatePeriods(){
+  const r=await rpc('admin_validate_periods');
+  if(r.code!==0){ toast(r.msg,'err'); return; }
+  const d=r.data||{};
+  if(d.ok){ toast('周期检查通过：周首尾相接、月都落在周边界上','ok'); return; }
+  const issues=(d.issues||[]).slice(0,4).map(x=>'· '+(x.message||JSON.stringify(x))).join('\n');
+  openModal(`<h3>周期检查未通过</h3><div class="desc">共 ${d.issue_count||0} 个问题：</div><div class="pre" style="white-space:pre-wrap;line-height:1.8">${esc(issues)}</div><div class="modal-actions"><button class="btn btn-primary" onclick="closeModal()">知道了</button></div>`);
+}
+function deletePeriod(id){
+  confirmDialog('删除周期','确定删除这个周期吗？\n\n当前周/当前月、已结算、或已有积分记录的周期不能删除。', async ()=>{
+    const r=await rpc('admin_delete_period', { p_id:id });
+    if(r.code!==0){ toast(r.msg,'err'); return; }
+    toast('周期已删除','ok');
+    await reloadData(false); renderSettings();
+  });
 }
 
 function toggleMaintenance(on){
@@ -3947,7 +3964,9 @@ function toggleMaintenance(on){
     ? (until?('确定开启维护吗？全站只读，结束时间：'+fmtDateTime(until)+'。'):'确定开启维护吗？开启后全站只读，到期自动解除。')
     : '确定立即结束维护并恢复全站读写吗？';
   confirmDialog('确认', msg, async ()=>{
-    const r=await rpc('admin_toggle_maintenance', { p_on:on, p_minutes:null, p_until:until });
+    const el2=document.getElementById('cfMaintMin');
+    const mins=el2&&el2.value?(+el2.value||null):null;
+    const r=await rpc('admin_toggle_maintenance', { p_on:on, p_minutes:mins, p_until:until });
     if(r.code!==0){ toast(r.msg,'err'); return; }
     await refreshPeriodState(); await loadAppState(); renderSettings();
     toast(on?'已开启维护':'已结束维护','ok');
@@ -4052,6 +4071,7 @@ function drawSourceName(x){
   const src=String((x&&x.source)||'');
   if(src==='manual') return '手动发放';
   if(src==='auto') return '月末自动';
+  if(src.indexOf('weekly_group_manual')===0) return '小组人工抽奖';
   if(src.indexOf('weekly_group')===0) return '小组抽选';
   if(src==='monthly_group_penalty') return '小组惩罚';
   if(x&&x.is_group) return '小组集体';

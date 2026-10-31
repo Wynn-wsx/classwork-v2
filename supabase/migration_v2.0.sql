@@ -2,7 +2,7 @@
 --  班级积分管理系统 V2.0.0 · 数据库增量迁移脚本（V1.6 -> V2.0）
 --  目标项目：Supabase（Postgres 15+）
 --  生成方式：由 _build/build_sql.py 从 _build/sql/ 模块拼接，请勿手改本文件
---  生成时间：2026-10-25 14:30:56
+--  生成时间：2026-10-31 23:33:25
 --
 --  【执行顺序 / 重要提醒】
 --  1) 先备份：Supabase 控制台 → Database → Backups；或在系统内「数据导出」保存一份 JSON。
@@ -54,7 +54,7 @@
 -- is_supervisor_now -> current_week_key）。关闭“创建函数时校验函数体”，
 -- 函数首次被调用时仍会完整校验，不影响运行期正确性。
 set check_function_bodies = off;
---  生成时间：2026-10-25 14:30:56
+--  生成时间：2026-10-31 23:33:25
 
 --  【脚本目录】（在 SQL Editor 里搜索下面的标题文字可快速定位）
 --   1. 扩展（pgcrypto）
@@ -245,6 +245,16 @@ create table if not exists public.boundaries (
   created_by  uuid,
   unique (type, boundary_at)
 );
+-- V2.0.19：周/月周期改为「起止日期」语义（period_key = 起始日期，稳定不变）
+alter table public.boundaries add column if not exists start_date date;
+alter table public.boundaries add column if not exists end_date date;
+alter table public.boundaries add column if not exists rule_weeks int not null default 1;
+alter table public.boundaries add column if not exists deprecated boolean not null default false;
+alter table public.boundaries alter column boundary_at drop not null;
+create unique index if not exists boundaries_type_start_uniq on public.boundaries(type, start_date) where start_date is not null;
+alter table public.boundaries drop constraint if exists boundaries_rule_weeks_check;
+alter table public.boundaries add constraint boundaries_rule_weeks_check check (rule_weeks between 1 and 4);
+
 create index if not exists boundaries_type_at_idx on public.boundaries(type, boundary_at desc);
 create index if not exists boundaries_at_idx on public.boundaries(boundary_at);
 
@@ -330,14 +340,17 @@ create table if not exists public.lottery_draws (
   used_by          uuid,
   used_at          timestamptz,
   related_record_id uuid references public.records(id) on delete set null,
-  note             text
+  note             text,
+  source_week_key  text not null default ''
 );
+alter table public.lottery_draws add column if not exists source_week_key text not null default '';
 alter table public.lottery_draws drop constraint if exists lottery_draws_pool_type_check;
 alter table public.lottery_draws add constraint lottery_draws_pool_type_check
   check (pool_type in ('reward','penalty'));
 alter table public.lottery_draws drop constraint if exists lottery_draws_source_check;
 alter table public.lottery_draws add constraint lottery_draws_source_check
-  check (source in ('manual','auto','weekly_group','weekly_group_reward','weekly_group_penalty','monthly_group_penalty'));
+  check (source in ('manual','auto','weekly_group','weekly_group_reward','weekly_group_penalty',
+                    'monthly_group_penalty','weekly_group_manual_reward','weekly_group_manual_penalty'));
 alter table public.lottery_draws drop constraint if exists lottery_draws_status_check;
 alter table public.lottery_draws add constraint lottery_draws_status_check
   check (status in ('unused','used','expired','void','posted'));
@@ -645,39 +658,74 @@ language sql immutable as $$
   select p_date - (extract(isodow from p_date)::int - 1);
 $$;
 
--- 最近一个已到点的指定类型分隔点（month/week/rule_update）
-create or replace function public.boundary_of(p_type text)
+-- ------------------------------------------------------------
+-- V2.0.19 周期（区间）解析：周/月存 start_date ~ end_date，进行中的月 end_date 为空
+-- period_key = 起始日期（稳定，不随周期关闭而改变）
+-- ------------------------------------------------------------
+create or replace function public.period_of_date(p_type text, p_date date)
 returns public.boundaries
 language sql stable security definer set search_path = public, extensions as $$
   select b.* from public.boundaries b
-   where b.type = p_type and b.boundary_at <= now()
-   order by b.boundary_at desc
+   where b.type = p_type
+     and b.deprecated = false
+     and b.start_date is not null
+     and b.start_date <= p_date
+     and coalesce(b.end_date, '9999-12-31'::date) >= p_date
+   order by b.start_date desc
    limit 1;
+$$;
+
+-- 「当前」周期：优先含今天的；否则最近已开始的；否则最早一条
+create or replace function public.current_period(p_type text)
+returns public.boundaries
+language plpgsql stable security definer set search_path = public, extensions as $$
+declare v public.boundaries;
+begin
+  v := public.period_of_date(p_type, public.bj_today());
+  if v.id is not null then return v; end if;
+  select b.* into v from public.boundaries b
+   where b.type = p_type and b.deprecated = false and b.start_date is not null
+     and b.start_date <= public.bj_today()
+   order by b.start_date desc limit 1;
+  if v.id is not null then return v; end if;
+  select b.* into v from public.boundaries b
+   where b.type = p_type and b.deprecated = false and b.start_date is not null
+   order by b.start_date limit 1;
+  return v;
+end;
+$$;
+
+create or replace function public.boundary_of(p_type text)
+returns public.boundaries
+language sql stable security definer set search_path = public, extensions as $$
+  select public.current_period(p_type);
+$$;
+
+create or replace function public.period_key_of(p_type text, p_date date)
+returns text
+language sql stable security definer set search_path = public, extensions as $$
+  select (public.period_of_date(p_type, p_date)).period_key;
 $$;
 
 create or replace function public.current_month_key() returns text
 language sql stable security definer set search_path = public, extensions as $$
-  select coalesce(
-    (public.boundary_of('month')).period_key,
-    public.bj_month_key()
-  );
+  select coalesce((public.current_period('month')).period_key, public.bj_month_key());
 $$;
 
 create or replace function public.current_week_key() returns text
 language sql stable security definer set search_path = public, extensions as $$
-  select coalesce(
-    (public.boundary_of('week')).period_key,
-    public.bj_week_start(public.bj_today())::text
-  );
+  select coalesce((public.current_period('week')).period_key, public.bj_week_start(public.bj_today())::text);
 $$;
 
 create or replace function public.next_month_boundary_at() returns timestamptz
 language sql stable security definer set search_path = public, extensions as $$
   select coalesce(
-    (select min(b.boundary_at) from public.boundaries b
-      where b.type = 'month' and b.boundary_at > now()),
-    ((date_trunc('month', (now() at time zone 'Asia/Shanghai')) + interval '1 month')
-      at time zone 'Asia/Shanghai')
+    (select (b.end_date + 1)::timestamp at time zone 'Asia/Shanghai'
+       from public.boundaries b
+      where b.type = 'month' and b.deprecated = false and b.end_date is not null
+        and b.end_date >= public.bj_today()
+      order by b.start_date limit 1),
+    ((public.bj_week_start(public.bj_today()) + 7)::timestamp at time zone 'Asia/Shanghai')
   );
 $$;
 
@@ -686,12 +734,14 @@ language sql stable security definer set search_path = public, extensions as $$
   select p_date > public.bj_today();
 $$;
 
--- 该业务日期所属登记月是否已冻结（早于最近一个已到点的月分隔点即冻结）
+-- 该业务日期是否落在「已结算且已结束」的月区间内（冻结）
 create or replace function public.is_month_frozen(p_date date) returns boolean
 language sql stable security definer set search_path = public, extensions as $$
-  select coalesce(
-    p_date < ((public.boundary_of('month')).boundary_at at time zone 'Asia/Shanghai')::date,
-    false
+  select exists (
+    select 1 from public.boundaries b
+     where b.type = 'month' and b.deprecated = false and b.settled = true
+       and b.end_date is not null
+       and p_date <= b.end_date
   );
 $$;
 
@@ -976,17 +1026,22 @@ create policy audit_logs_select on public.audit_logs
 -- ------------------------------------------------------------
 -- 5.1 内部：规则周期上限校验（add/update 共用，不对前端授权）
 --     周期边界 = 最近一个已到点的周分隔点 / 自定义更新点 / 月分隔点
---     统计口径：该规则在本周期内「登记时间」落在区间的有效记录
+--     统计口径：**按被登记的学生**统计——同一学生在同一规则、同一周期内
+--               最多登记 limit_value 次 / limit_value 分（不是全班合计）
 -- ------------------------------------------------------------
 create or replace function public.check_rule_limit(
-  p_rule_id  uuid,
-  p_points   numeric,
-  p_exclude  uuid default null
+  p_rule_id    uuid,
+  p_points     numeric,
+  p_student_id uuid,
+  p_date       date,
+  p_exclude    uuid default null
 ) returns void
 language plpgsql security definer set search_path = public, extensions as $$
 declare
   r        public.rules;
-  v_start  timestamptz;
+  v_w      public.boundaries;
+  v_mult   int;
+  v_limit  numeric;
   v_used   numeric;
   v_cnt    int;
   v_delta  numeric;
@@ -1001,13 +1056,17 @@ begin
   if r.limit_type = 'none' or r.limit_value is null then
     return;
   end if;
+  if p_student_id is null then
+    raise exception '规则上限需要指定被登记的学生';
+  end if;
 
-  select coalesce(max(b.boundary_at), now() - interval '30 days')
-    into v_start
-    from public.boundaries b
-   where b.boundary_at <= now()
-     and b.type in ('week', 'rule_update', 'month');
-
+  -- 周期 = 登记日期所在「周周期」；额度 = 单周期上限 × 规则计分周数
+  v_w := public.period_of_date('week', coalesce(p_date, public.bj_today()));
+  if v_w.id is null then
+    raise exception '登记日期不在任何周周期内，请先在「设置 → 周期定义」补齐周期';
+  end if;
+  v_mult  := greatest(coalesce(v_w.rule_weeks, 1), 1);
+  v_limit := r.limit_value * v_mult;
   v_delta := case when r.score_type = '扣分' then abs(p_points) else p_points end;
 
   select count(*),
@@ -1015,22 +1074,27 @@ begin
     into v_cnt, v_used
     from public.records rc
    where rc.rule_id = p_rule_id
+     and rc.student_id = p_student_id
      and rc.status = '正常'
-     and rc.created_at >= v_start
+     and rc.record_date >= to_char(v_w.start_date, 'YYYY-MM-DD')
+     and rc.record_date <= to_char(v_w.end_date, 'YYYY-MM-DD')
      and (p_exclude is null or rc.id <> p_exclude);
 
   if r.limit_type = 'count' then
-    if v_cnt + 1 > r.limit_value then
-      raise exception '规则「%」本周期最多登记 % 次，已达上限，不能再登记', r.reason, r.limit_value::int;
+    if v_cnt + 1 > v_limit then
+      raise exception '规则「%」每位学生本周期最多登记 % 次（该生已登记 % 次%s），已达上限',
+        r.reason, v_limit::int, v_cnt,
+        case when v_mult > 1 then '；本周按 ' || v_mult || ' 个规则计分周' else '' end;
     end if;
   else
-    if v_used + v_delta > r.limit_value then
-      raise exception '规则「%」本周期分值上限 %，已用 %，本次 % 将超限', r.reason, r.limit_value, v_used, v_delta;
+    if v_used + v_delta > v_limit then
+      raise exception '规则「%」每位学生本周期分值上限 %（该生已用 %，本次 %）%', r.reason, v_limit, v_used, v_delta,
+        case when v_mult > 1 then '；本周按 ' || v_mult || ' 个规则计分周' else '' end;
     end if;
   end if;
 end;
 $$;
-revoke all on function public.check_rule_limit(uuid, numeric, uuid) from public, anon, authenticated;
+revoke all on function public.check_rule_limit(uuid, numeric, uuid, date, uuid) from public, anon, authenticated;
 
 -- ------------------------------------------------------------
 -- 5.2 新增记录
@@ -1047,8 +1111,10 @@ create or replace function public.add_record(
 ) returns jsonb
 language plpgsql security definer set search_path = public, extensions as $$
 declare
-  v_role text := public.caller_role();
-  v_rec  public.records;
+  v_role  text := public.caller_role();
+  v_rec   public.records;
+  v_week  public.boundaries;
+  v_month public.boundaries;
 begin
   -- 监督委员（学生，当周临时授权）可以登记积分；其余角色按原权限
   if v_role not in ('system','super_admin','admin','executive','group_recorder') then
@@ -1090,7 +1156,13 @@ begin
     raise exception '该登记月已冻结，不能新增记录（如需纠错请让管理员处理）';
   end if;
 
-  perform public.check_rule_limit(p_rule_id, p_points, null);
+  v_week  := public.period_of_date('week', p_record_date);
+  v_month := public.period_of_date('month', p_record_date);
+  if v_week.id is null or v_month.id is null then
+    raise exception '该日期不在任何周期内，请先在「设置 → 周期定义」补齐周期';
+  end if;
+
+  perform public.check_rule_limit(p_rule_id, p_points, p_student_id, p_record_date, null);
 
   insert into public.records (
     student_id, score_type, category, reason, points, recorder_id, recorder_name,
@@ -1099,7 +1171,7 @@ begin
     p_student_id, p_score_type, coalesce(p_category,''), coalesce(p_reason,''), p_points, auth.uid(),
     (select p.name from public.profiles p where p.id = auth.uid()),
     p_record_date::text, '正常', p_evidence, p_rule_id,
-    now() + interval '2 seconds', to_char(p_record_date, 'YYYY-MM')
+    now() + interval '2 seconds', v_month.period_key
   ) returning * into v_rec;
 
   perform public.write_audit('add_record', 'record', v_rec.id::text,
@@ -1124,9 +1196,11 @@ create or replace function public.update_record(
 language plpgsql security definer set search_path = public, extensions as $$
 declare
   v_role text := public.caller_role();
-  v_old  public.records;
-  v_new  public.records;
-  v_date date;
+  v_old   public.records;
+  v_new   public.records;
+  v_date  date;
+  v_week  public.boundaries;
+  v_month public.boundaries;
 begin
   perform public.require_role(array['super_admin','admin','executive','group_recorder'], '没有权限修改积分记录');
   if public.is_maintenance() then
@@ -1160,14 +1234,20 @@ begin
     raise exception '目标登记月已冻结，不能改到该月';
   end if;
 
-  perform public.check_rule_limit(v_old.rule_id, p_points, v_old.id);
+  v_week  := public.period_of_date('week', v_date);
+  v_month := public.period_of_date('month', v_date);
+  if v_week.id is null or v_month.id is null then
+    raise exception '目标日期不在任何周期内，请先在「设置 → 周期定义」补齐周期';
+  end if;
+
+  perform public.check_rule_limit(v_old.rule_id, p_points, v_old.student_id, v_date, v_old.id);
 
   update public.records
      set reason      = coalesce(p_reason, reason),
          points      = p_points,
          evidence    = coalesce(p_evidence, evidence),
          record_date = v_date::text,
-         period_key  = to_char(v_date, 'YYYY-MM'),
+         period_key  = v_month.period_key,
          modified_by = auth.uid(),
          modified_by_name = (select p.name from public.profiles p where p.id = auth.uid()),
          modified_at = now(),
@@ -1724,79 +1804,40 @@ grant execute on function public.get_period_state() to authenticated;
 -- ------------------------------------------------------------
 -- 内部：按配置预生成周/月分隔点（幂等，已存在则跳过）
 -- ------------------------------------------------------------
+-- ------------------------------------------------------------
+-- V2.0.19：不再按规则批量铺底；只保证「当前周」与「当前月（进行中）」各一条作为起点
+-- ------------------------------------------------------------
 create or replace function public.ensure_boundaries(
   p_months_back    int default 6,
   p_months_forward int default 12
 ) returns int
 language plpgsql security definer set search_path = public, extensions as $$
 declare
-  v_local   timestamp := (now() at time zone 'Asia/Shanghai');
-  v_week    jsonb;
-  v_month   jsonb;
-  v_dow     int;
-  v_hour    int;
-  v_minute  int;
-  v_dom     int;
-  v_cursor  timestamp;
-  v_cand    timestamp;
-  v_end     timestamp;
-  v_start   timestamp;
-  v_count   int := 0;
+  v_today date := public.bj_today();
+  v_ws    date := public.bj_week_start(public.bj_today());
+  v_n     int := 0;
 begin
-  -- V2.0.6：可关闭「按规则自动生成未来分隔点」，关闭后只能手动增删分隔点
-  if not coalesce((select auto_boundaries from public.app_config where id = 1), true) then
-    return 0;
-  end if;
-  select coalesce(week_rule, '{"dow":1,"hour":0,"minute":0}'::jsonb),
-         coalesce(month_rule, '{"dom":1,"hour":0,"minute":0}'::jsonb)
-    into v_week, v_month
-    from public.app_config where id = 1;
-  if v_week is null then
-    v_week := '{"dow":1,"hour":0,"minute":0}'::jsonb;
-  end if;
-  if v_month is null then
-    v_month := '{"dom":1,"hour":0,"minute":0}'::jsonb;
+  if not exists (select 1 from public.boundaries where type = 'week' and start_date = v_ws) then
+    insert into public.boundaries (type, period_key, start_date, end_date, rule_weeks, boundary_at, label, is_manual, settled)
+    values ('week', to_char(v_ws, 'YYYY-MM-DD'), v_ws, v_ws + 6, 1,
+            ((v_ws + 7)::timestamp at time zone 'Asia/Shanghai'),
+            to_char(v_ws, 'YYYY-MM-DD') || ' ~ ' || to_char(v_ws + 6, 'YYYY-MM-DD'), false,
+            ((v_ws + 7)::timestamp at time zone 'Asia/Shanghai') <= now() - interval '1 day')
+    on conflict do nothing;
+    v_n := v_n + 1;
   end if;
 
-  v_start := date_trunc('month', v_local) - make_interval(months => greatest(p_months_back, 0));
-  v_end   := v_local + make_interval(months => greatest(p_months_forward, 1));
+  if not exists (select 1 from public.boundaries b
+                  where b.type = 'month' and b.start_date <= v_today
+                    and coalesce(b.end_date, '9999-12-31'::date) >= v_today) then
+    insert into public.boundaries (type, period_key, start_date, end_date, rule_weeks, boundary_at, label, is_manual, settled)
+    values ('month', to_char(v_ws, 'YYYY-MM-DD'), v_ws, null, 1, null,
+            to_char(v_ws, 'YYYY-MM-DD') || ' ~ （进行中）', false, false)
+    on conflict do nothing;
+    v_n := v_n + 1;
+  end if;
 
-  -- 月分隔点
-  v_dom    := coalesce((v_month->>'dom')::int, 1);
-  v_hour   := coalesce((v_month->>'hour')::int, 0);
-  v_minute := coalesce((v_month->>'minute')::int, 0);
-  v_cursor := v_start;
-  while v_cursor <= v_end loop
-    v_cand := v_cursor + make_interval(days => v_dom - 1, hours => v_hour, mins => v_minute);
-    -- 历史分隔点（1 天以前）直接标记为已结算，避免首次配置时 cron 把过去半年的周期全部补结算一遍
-    insert into public.boundaries (type, period_key, boundary_at, label, is_manual, settled)
-    values ('month', to_char(v_cand, 'YYYY-MM'), v_cand at time zone 'Asia/Shanghai',
-            to_char(v_cand, 'YYYY"年"MM"月"'), false,
-            (v_cand at time zone 'Asia/Shanghai') <= now() - interval '1 day')
-    on conflict (type, boundary_at) do nothing;
-    get diagnostics v_count = row_count;
-    v_cursor := v_cursor + interval '1 month';
-  end loop;
-
-  -- 周分隔点（按配置星期几逐日扫描）
-  v_dow    := coalesce((v_week->>'dow')::int, 1);
-  v_hour   := coalesce((v_week->>'hour')::int, 0);
-  v_minute := coalesce((v_week->>'minute')::int, 0);
-  v_cursor := date_trunc('day', v_start) - interval '8 days';
-  while v_cursor <= v_end loop
-    if extract(isodow from v_cursor)::int = v_dow then
-      v_cand := v_cursor + make_interval(hours => v_hour, mins => v_minute);
-      insert into public.boundaries (type, period_key, boundary_at, label, is_manual, settled)
-      values ('week', to_char(v_cand, 'IYYY-IW'), v_cand at time zone 'Asia/Shanghai',
-              to_char(v_cand, 'YYYY-MM-DD') || ' 周分隔点', false,
-              (v_cand at time zone 'Asia/Shanghai') <= now() - interval '1 day')
-      on conflict (type, boundary_at) do nothing;
-      get diagnostics v_count = row_count;
-    end if;
-    v_cursor := v_cursor + interval '1 day';
-  end loop;
-
-  return v_count;
+  return v_n;
 end;
 $$;
 revoke all on function public.ensure_boundaries(int, int) from public, anon, authenticated;
@@ -2334,7 +2375,7 @@ begin
     v_is_group := true;
     v_group := p_group_name;
     v_members := to_jsonb(public.group_members(v_group));
-    if v_role in ('super_admin','admin','executive','group_recorder') then
+    if v_role in ('super_admin','admin','executive') then
       v_target := coalesce(p_student_id,
         (select s.id from public.students s where s.group_name = v_group order by s.created_at, s.id limit 1));
     else
@@ -2351,9 +2392,7 @@ begin
         raise exception '只能给自己抽选';
       end if;
     elsif v_role = 'group_recorder' then
-      if not public.student_in_my_group(v_target) then
-        raise exception '记录员只能代本组学生抽选';
-      end if;
+      raise exception '个人抽选已收回记录员代抽权限，请学生本人抽选，或由执行小组及以上代抽';
     elsif v_role not in ('super_admin','admin','executive') then
       raise exception '没有权限抽选';
     end if;
@@ -2878,15 +2917,9 @@ begin
     raise exception '奖池类型不合法';
   end if;
 
-  -- 权限：老师/执行小组可代任意组；本组成员（含学生本人、记录员）可代表本组抽选
-  if v_role in ('system','super_admin','admin','executive') then
-    null;
-  elsif v_role in ('group_recorder','student') then
-    if v_group is distinct from public.my_group_name() then
-      raise exception '只能代表自己所在的小组抽选';
-    end if;
-  else
-    raise exception '没有权限进行小组抽选';
+  -- V2.0.14：小组抽奖收回小组记录员/学生的代抽权限，统一由执行小组及以上操作
+  if v_role not in ('system','super_admin','admin','executive') then
+    raise exception '小组抽奖仅限执行小组及以上操作，请在「奖惩抽选」里选择小组由班干部抽取';
   end if;
 
   -- 同一小组同一奖池同一周期串行执行：多人同时点，只有最早一次写入生效
@@ -3039,16 +3072,15 @@ begin
     return v_exist;
   end if;
 
-  v_end := v_b.boundary_at;
-  v_start := coalesce(
-    (select max(b.boundary_at) from public.boundaries b
-      where b.type = 'week' and b.boundary_at < v_end),
-    v_end - interval '7 days');
-  v_sd := (v_start at time zone 'Asia/Shanghai')::date;
-  v_ed := (v_end at time zone 'Asia/Shanghai')::date;
+  if v_b.start_date is null or v_b.end_date is null then
+    raise exception '该周周期缺少起止日期，请先在「设置 → 周期定义」补全';
+  end if;
+  v_sd := v_b.start_date;
+  v_ed := v_b.end_date + 1;                       -- 取不含上界
+  v_start := v_sd::timestamp at time zone 'Asia/Shanghai';
+  v_end   := v_ed::timestamp at time zone 'Asia/Shanghai';
   v_week_key := v_b.period_key;
-  -- 本周（结算覆盖的那段）所属自然月 → 奖励次数入该月
-  v_month_key := to_char((v_end - interval '1 second') at time zone 'Asia/Shanghai', 'YYYY-MM');
+  v_month_key := coalesce(public.period_key_of('month', v_b.end_date), public.current_month_key());
 
   select coalesce((public.cfg()->>'week_reward_top_groups')::int, 3),
          coalesce((public.cfg()->>'week_penalty_bottom_groups')::int, 3)
@@ -3127,7 +3159,7 @@ begin
     'type', 'week',
     'week_key', v_week_key,
     'range_start', v_start,
-    'range_end', v_end,
+    'range_end', (v_ed - 1),
     'groups', v_groups,
     'individuals', v_individuals,
     'reward_groups', (select coalesce(jsonb_agg(g), '[]'::jsonb)
@@ -3143,71 +3175,37 @@ begin
     'generated_at', now()
   );
   insert into public.weekly_summaries (period_key, boundary_id, range_start, range_end, summary)
-  values (v_week_key, p_boundary_id, v_start, v_end, v_summary);
+  values (v_week_key, p_boundary_id, v_start, ((v_ed - 1)::timestamp at time zone 'Asia/Shanghai'), v_summary);
 
-  -- ① 前 N 组：每组获得 1 次集体奖励抽选机会（按 pos 取，避免并列把名额放大）
-  insert into public.lottery_group_chances
-    (group_name, period_key, pool_type, chance_type, source_week_key, amount, note)
-  select g->>'group_name', v_month_key, 'reward', 'weekly_group_reward', v_week_key, 1,
-         format('%s 周小组积分第 %s 名', v_week_key, g->>'pos')
-    from jsonb_array_elements(v_groups) g
-   where (g->>'pos')::int <= v_top
-  on conflict (group_name, period_key, chance_type, source_week_key) do nothing;
-  get diagnostics v_reward_chances = row_count;
-
-  -- 通知前 N 组全体成员
-  for v_p in
-    select p.id as profile_id, s.group_name, (g->>'pos') as pos
-      from jsonb_array_elements(v_groups) g
-      join public.students s on s.group_name = g->>'group_name'
-      join public.profiles p on p.student_id = s.id
-     where (g->>'pos')::int <= v_top and p.status = 'active'
-  loop
-    perform public.notify(v_p.profile_id, '本周小组集体奖励抽选机会',
-      format('你所在的「%s」小组本周积分第 %s 名，获得 1 次集体奖励抽选机会，由小组记录员代表全组抽选。',
-             v_p.group_name, v_p.pos),
-      'lottery', null, null);
-  end loop;
-
-  -- ② 后 N 组：每组获得 1 次小组惩罚抽选机会（代表抽选，全组共担执行）
-  insert into public.lottery_group_chances
-    (group_name, period_key, pool_type, chance_type, source_week_key, amount, note)
-  select g->>'group_name', v_month_key, 'penalty', 'weekly_group_penalty', v_week_key, 1,
-         format('%s 周小组积分第 %s 名', v_week_key, g->>'pos')
-    from jsonb_array_elements(v_groups) g
-   where v_group_cnt >= v_top + v_bottom
-     and (g->>'pos')::int > greatest(v_top, v_group_cnt - v_bottom)
-  on conflict (group_name, period_key, chance_type, source_week_key) do nothing;
-  get diagnostics v_penalty_chances = row_count;
-
-  -- 通知后 N 组全体成员
-  for v_p in
-    select p.id as profile_id, s.group_name, (g->>'pos') as pos
-      from jsonb_array_elements(v_groups) g
-      join public.students s on s.group_name = g->>'group_name'
-      join public.profiles p on p.student_id = s.id
-     where v_group_cnt >= v_top + v_bottom
-       and (g->>'pos')::int > greatest(v_top, v_group_cnt - v_bottom)
-       and p.status = 'active'
-  loop
-    perform public.notify(v_p.profile_id, '本周小组惩罚抽选机会',
-      format('你所在的「%s」小组本周积分第 %s 名，需进行 1 次小组惩罚抽选，由小组记录员代表全组抽选，结果全组共担。',
-             v_p.group_name, v_p.pos),
-      'lottery', null, null);
-  end loop;
-
+  -- V2.0.14：周结算只写汇总快照，不再发放抽选次数、也不再自动抽惩罚。
+  --   小组抽奖改为人工：由执行小组及以上在「奖惩抽选 → 小组」里选择小组后抽取（每组每池每周限一次）。
+  --   summary 中的 reward_groups / penalty_groups 仅作为「建议名单」展示。
   v_summary := v_summary || jsonb_build_object(
     'effects_done', true,
+    'snapshot_only', true,
     'reward_chances_added', 0,
-    'penalty_draws', v_penalty_draws,
-    'reward_group_chances', v_reward_chances,
-    'penalty_group_chances', v_penalty_chances);
+    'penalty_draws', 0,
+    'reward_group_chances', 0,
+    'penalty_group_chances', 0);
   update public.weekly_summaries set summary = v_summary where boundary_id = p_boundary_id;
   update public.boundaries set settled = true where id = p_boundary_id;
+
+  -- 通知执行小组及以上：周汇总已生成，可开始人工小组抽奖
+  perform public.notify_audience('executive_plus',
+    format('%s 周汇总已生成', v_week_key),
+    format('奖励建议：%s；惩罚建议：%s。请到「奖惩抽选 → 小组」选择小组抽奖（每组每池每周限一次；奖励全组每人一份，惩罚全组共担）。',
+      coalesce((select string_agg(g->>'group_name', '、')
+                  from jsonb_array_elements(v_groups) g
+                 where (g->>'pos')::int <= v_top), '无'),
+      coalesce((select string_agg(g->>'group_name', '、')
+                  from jsonb_array_elements(v_groups) g
+                 where v_group_cnt >= v_top + v_bottom
+                   and (g->>'pos')::int > greatest(v_top, v_group_cnt - v_bottom)), '无')),
+    'period', 'weekly_summary',
+    (select id from public.weekly_summaries where boundary_id = p_boundary_id limit 1));
+
   perform public.write_audit('weekly_snapshot', 'boundary', p_boundary_id::text,
-    jsonb_build_object('week_key', v_week_key,
-      'reward_group_chances', v_reward_chances,
-      'penalty_group_chances', v_penalty_chances));
+    jsonb_build_object('week_key', v_week_key, 'snapshot_only', true));
   return v_summary;
 end;
 $$;
@@ -3245,6 +3243,7 @@ declare
   v_reward_rows jsonb;
   v_penalty_rows jsonb;
   v_auto       int;
+  v_rec_cnt    int := 0;
 begin
   select * into v_b from public.boundaries where id = p_boundary_id;
   if v_b.id is null then
@@ -3260,14 +3259,17 @@ begin
     return v_st.summary;
   end if;
 
-  v_end := v_b.boundary_at;
-  v_start := coalesce(
-    (select max(b.boundary_at) from public.boundaries b
-      where b.type = 'month' and b.boundary_at < v_end),
-    v_end - interval '1 month');
-  v_sd := (v_start at time zone 'Asia/Shanghai')::date;
-  v_ed := (v_end at time zone 'Asia/Shanghai')::date;
-  v_month_key := to_char((v_end - interval '1 second') at time zone 'Asia/Shanghai', 'YYYY-MM');
+  if v_b.start_date is null then
+    raise exception '该月周期缺少起始日期，请先在「设置 → 周期定义」补全';
+  end if;
+  if v_b.end_date is null then
+    raise exception '该月周期尚未结束（未填结束日期），不能结算';
+  end if;
+  v_sd := v_b.start_date;
+  v_ed := v_b.end_date + 1;                       -- 取不含上界
+  v_start := v_sd::timestamp at time zone 'Asia/Shanghai';
+  v_end   := v_ed::timestamp at time zone 'Asia/Shanghai';
+  v_month_key := v_b.period_key;
 
   -- 维护窗口（设计：月结算期间全站只读 30 分钟）
   update public.app_config
@@ -3284,6 +3286,32 @@ begin
 
   insert into public.settlements (period_key, boundary_id, started_at, status)
   values (v_month_key, p_boundary_id, now(), 'running');
+
+  -- V2.0.14：当月没有任何有效记录时只写空结算，不产生任何次数/抽选/第二类名单
+  select count(*) into v_rec_cnt
+    from public.records
+   where status = '正常'
+     and record_date >= to_char(v_sd, 'YYYY-MM-DD')
+     and record_date <  to_char(v_ed, 'YYYY-MM-DD');
+  if v_rec_cnt = 0 then
+    v_summary := jsonb_build_object(
+      'type', 'month', 'month_key', v_month_key,
+      'range_start', v_start, 'range_end', (v_ed - 1),
+      'groups', '[]'::jsonb, 'individuals', '[]'::jsonb,
+      'second_class', '[]'::jsonb, 'second_class_count', 0,
+      'reward', jsonb_build_object('rows', '[]'::jsonb, 'forfeit', '[]'::jsonb),
+      'penalty', jsonb_build_object('rows', '[]'::jsonb),
+      'auto_draw_count', 0, 'cards_expired', 0,
+      'empty_month', true, 'generated_at', now());
+    update public.settlements
+       set status = 'done', finished_at = now(), summary = v_summary,
+           second_class = '[]'::jsonb, auto_draw_count = 0
+     where boundary_id = p_boundary_id and status <> 'rolled_back';
+    update public.boundaries set settled = true where id = p_boundary_id;
+    perform public.write_audit('monthly_settle_empty', 'boundary', p_boundary_id::text,
+      jsonb_build_object('month_key', v_month_key, 'records', 0));
+    return v_summary;
+  end if;
 
   -- 个人月积分（加分 / 扣分 / 净分）
   select coalesce(jsonb_agg(jsonb_build_object(
@@ -3384,19 +3412,40 @@ begin
     v_second_ids := '{}';
   end if;
 
-  -- 奖励次数 = max(floor(月加分/阈值), 月加分前 N 名则 1)，max 去重后写成一条
+  -- 奖励次数（V2.0.16 口径，用户确认）：
+  --   (a) 月净积分排名前 v_top_n（默认 15）名，不论净分正负，每人 1 次 → chance_type = monthly_top15
+  --   (b) 净分正分部分每满 v_reward_thr（默认 10）分追加 1 次，不足不计 → chance_type = monthly_points
+  --   并列同分同名次、一并计入
+  insert into public.lottery_chances (student_id, period_key, pool_type, chance_type, amount, source_week_key)
+  select q.student_id, v_month_key, 'reward', 'monthly_top15', 1, ''
+    from (
+      select s.id as student_id,
+             rank() over (order by coalesce(x.add_total,0) - coalesce(x.ded_total,0) desc) as rk
+        from public.students s
+        left join (
+          select rec.student_id,
+                 sum(case when rec.points > 0 then rec.points else 0 end) as add_total,
+                 sum(case when rec.points < 0 then abs(rec.points) else 0 end) as ded_total
+            from public.records rec
+           where rec.status = '正常'
+             and rec.record_date >= to_char(v_sd, 'YYYY-MM-DD')
+             and rec.record_date <  to_char(v_ed, 'YYYY-MM-DD')
+           group by rec.student_id
+        ) x on x.student_id = s.id
+    ) q
+   where q.rk <= v_top_n
+  on conflict (student_id, period_key, chance_type, source_week_key) do nothing;
+
   insert into public.lottery_chances (student_id, period_key, pool_type, chance_type, amount, source_week_key)
   select q.student_id, v_month_key, 'reward', 'monthly_points', q.amount, ''
     from (
       select s.id as student_id,
-             greatest(
-               floor(coalesce(x.add_total,0) / v_reward_thr)::int,
-               case when rank() over (order by coalesce(x.add_total,0) desc) <= v_top_n then 1 else 0 end
-             ) as amount
+             floor(greatest(coalesce(x.add_total,0) - coalesce(x.ded_total,0), 0) / v_reward_thr)::int as amount
         from public.students s
         left join (
           select rec.student_id,
-                 sum(case when rec.points > 0 then rec.points else 0 end) as add_total
+                 sum(case when rec.points > 0 then rec.points else 0 end) as add_total,
+                 sum(case when rec.points < 0 then abs(rec.points) else 0 end) as ded_total
             from public.records rec
            where rec.status = '正常'
              and rec.record_date >= to_char(v_sd, 'YYYY-MM-DD')
@@ -3407,39 +3456,41 @@ begin
    where q.amount > 0
   on conflict (student_id, period_key, chance_type, source_week_key) do nothing;
 
-  -- 惩罚次数（V2.0.10 规则）：
-  --   普通学生 = floor(月扣分/阈值)
-  --   按排名惩罚（后 N 名）= max(floor(月扣分/阈值), 1) 作为基础次数；
-  --     若该生本月可通过积分获得奖励（加分/阈值 ≥ 1，或月加分前 N 名兜底 1 次），
-  --     则用 1 次奖励抵消 1 次惩罚（基础次数 -1，最低 0）；
-  --   基础次数为 0 时不再额外发放（即「不能通过积分结算惩罚」才记这一次）。
-  --   次数归属：来自扣分的记 penalty_points，保底补的那 1 次记 second_class。
+  -- 惩罚次数（V2.0.16 口径，用户确认）：
+  --   基础惩罚 = floor(负分绝对值 / v_penalty_thr)
+  --   排名惩罚 = 名单内（月净分倒数 v_n 名，含并列）且本月奖励次数 = 0 → 追加 1 次
+  --   抵消     = 基础惩罚与排名惩罚重合时自动减 1（等价于：名单内 final = max(基础, 1)）
+  --   封顶     = 单人单月惩罚最多 3 次
   insert into public.lottery_chances (student_id, period_key, pool_type, chance_type, amount, source_week_key)
   select q.student_id, v_month_key, 'penalty',
          case when q.base_points > 0 then 'penalty_points' else 'second_class' end,
          q.final_amount, ''
     from (
-      select s.id as student_id,
-             floor(coalesce(x.ded_total,0) / v_penalty_thr)::int as base_points,
-             greatest(
-               (case when s.id = any(v_second_ids)
-                     then greatest(floor(coalesce(x.ded_total,0) / v_penalty_thr)::int, 1)
-                     else floor(coalesce(x.ded_total,0) / v_penalty_thr)::int end)
-               - (case when s.id = any(v_second_ids)
-                        and floor(coalesce(x.add_total,0) / v_reward_thr) >= 1 then 1 else 0 end),
-               0
-             ) as final_amount
-        from public.students s
-        left join (
-          select rec.student_id,
-                 sum(case when rec.points < 0 then abs(rec.points) else 0 end) as ded_total,
-                 sum(case when rec.points > 0 then rec.points else 0 end) as add_total
-            from public.records rec
-           where rec.status = '正常'
-             and rec.record_date >= to_char(v_sd, 'YYYY-MM-DD')
-             and rec.record_date <  to_char(v_ed, 'YYYY-MM-DD')
-           group by rec.student_id
-        ) x on x.student_id = s.id
+      select a.student_id, a.base_points,
+             least(
+               case when a.in_list and a.reward_total = 0
+                    then greatest(a.base_points, 1)
+                    else a.base_points end,
+               3) as final_amount
+        from (
+          select s.id as student_id,
+                 floor(greatest(-(coalesce(x.add_total,0) - coalesce(x.ded_total,0)), 0) / v_penalty_thr)::int as base_points,
+                 (s.id = any(v_second_ids)) as in_list,
+                 (case when rank() over (order by coalesce(x.add_total,0) - coalesce(x.ded_total,0) desc) <= v_top_n
+                       then 1 else 0 end)
+                 + floor(greatest(coalesce(x.add_total,0) - coalesce(x.ded_total,0), 0) / v_reward_thr)::int as reward_total
+            from public.students s
+            left join (
+              select rec.student_id,
+                     sum(case when rec.points > 0 then rec.points else 0 end) as add_total,
+                     sum(case when rec.points < 0 then abs(rec.points) else 0 end) as ded_total
+                from public.records rec
+               where rec.status = '正常'
+                 and rec.record_date >= to_char(v_sd, 'YYYY-MM-DD')
+                 and rec.record_date <  to_char(v_ed, 'YYYY-MM-DD')
+               group by rec.student_id
+            ) x on x.student_id = s.id
+        ) a
     ) q
    where q.final_amount > 0
   on conflict (student_id, period_key, chance_type, source_week_key) do nothing;
@@ -3450,30 +3501,56 @@ begin
 
   -- 记录本月应得/已抽情况（供快照与 reward_forfeit 标注）
   select coalesce(jsonb_agg(jsonb_build_object(
-           'student_id', c.student_id, 'name', s.name,
-           'amount', c.amount, 'used_before_auto', c.used_count,
-           'remaining_before_auto', c.amount - c.used_count) order by s.name), '[]'::jsonb)
+           'student_id', g.student_id, 'name', g.name,
+           'amount', g.amount, 'used_before_auto', g.used,
+           'remaining_before_auto', g.amount - g.used,
+           'top15_bonus', g.top15_bonus, 'net_bonus', g.net_bonus) order by g.name), '[]'::jsonb)
     into v_reward_rows
-    from public.lottery_chances c join public.students s on s.id = c.student_id
-   where c.period_key = v_month_key and c.pool_type = 'reward';
+    from (
+      select c.student_id, s.name,
+             sum(c.amount)::int as amount,
+             sum(c.used_count)::int as used,
+             sum(case when c.chance_type = 'monthly_top15' then c.amount else 0 end)::int as top15_bonus,
+             sum(case when c.chance_type = 'monthly_points' then c.amount else 0 end)::int as net_bonus
+        from public.lottery_chances c join public.students s on s.id = c.student_id
+       where c.period_key = v_month_key and c.pool_type = 'reward'
+       group by c.student_id, s.name
+    ) g;
 
   select coalesce(jsonb_agg(jsonb_build_object(
-           'student_id', c.student_id, 'name', s.name, 'chance_type', c.chance_type,
-           'amount', c.amount, 'used_before_auto', c.used_count,
-           'remaining_before_auto', c.amount - c.used_count) order by s.name), '[]'::jsonb)
+           'student_id', g.student_id, 'name', g.name, 'chance_type', g.chance_type,
+           'amount', g.amount, 'base_amount', g.base_amount, 'rank_amount', g.rank_amount,
+           'in_list', g.in_list,
+           'used_before_auto', g.used,
+           'remaining_before_auto', g.amount - g.used) order by g.name), '[]'::jsonb)
     into v_penalty_rows
-    from public.lottery_chances c join public.students s on s.id = c.student_id
-   where c.period_key = v_month_key and c.pool_type = 'penalty';
+    from (
+      select c.student_id, s.name,
+             min(c.chance_type) as chance_type,
+             sum(c.amount)::int as amount,
+             sum(case when c.chance_type = 'penalty_points' then c.amount else 0 end)::int as base_amount,
+             sum(case when c.chance_type = 'second_class' then c.amount else 0 end)::int as rank_amount,
+             (s.id = any(v_second_ids)) as in_list,
+             sum(c.used_count)::int as used
+        from public.lottery_chances c join public.students s on s.id = c.student_id
+       where c.period_key = v_month_key and c.pool_type = 'penalty'
+       group by c.student_id, s.name, s.id
+    ) g;
 
   -- 第二类学生未使用的奖励次数：账面标 reward_forfeit（结果照常自动抽、不追回）
   select coalesce(jsonb_agg(jsonb_build_object(
-           'student_id', c.student_id, 'name', s.name,
-           'remaining', c.amount - c.used_count, 'reward_forfeit', true) order by s.name), '[]'::jsonb)
+           'student_id', g.student_id, 'name', g.name,
+           'remaining', g.remaining, 'reward_forfeit', true) order by g.name), '[]'::jsonb)
     into v_forfeit
-    from public.lottery_chances c join public.students s on s.id = c.student_id
-   where c.period_key = v_month_key and c.pool_type = 'reward'
-     and c.used_count < c.amount
-     and c.student_id = any(v_second_ids);
+    from (
+      select c.student_id, s.name, sum(c.amount - c.used_count)::int as remaining
+        from public.lottery_chances c join public.students s on s.id = c.student_id
+       where c.period_key = v_month_key and c.pool_type = 'reward'
+         and c.used_count < c.amount
+         and c.student_id = any(v_second_ids)
+       group by c.student_id, s.name
+    ) g
+   where true;
 
   -- 未用次数自动抽选（奖励池 + 惩罚池）
   for v_p in
@@ -3490,7 +3567,7 @@ begin
     'type', 'month',
     'month_key', v_month_key,
     'range_start', v_start,
-    'range_end', v_end,
+    'range_end', (v_ed - 1),
     'groups', v_groups,
     'individuals', v_individuals,
     'second_class', v_second,
@@ -3514,7 +3591,7 @@ begin
     'period', 'settlement', (select id from public.settlements
                               where boundary_id = p_boundary_id and status <> 'rolled_back' limit 1));
   perform public.write_audit('monthly_settle', 'boundary', p_boundary_id::text,
-    jsonb_build_object('month_key', v_month_key, 'second_class', jsonb_array_length(v_second),
+    jsonb_build_object('month_key', v_month_key, 'penalty_rank_list', jsonb_array_length(v_second),
                        'auto_draw_count', v_auto_total, 'cards_expired', v_cards_exp));
   return v_summary;
 end;
@@ -3606,7 +3683,7 @@ begin
     raise exception '该月已结算完成，不能自动重算（历史快照与抽选结果不可追改）';
   end if;
 
-  v_month_key := to_char((v_b.boundary_at - interval '1 second') at time zone 'Asia/Shanghai', 'YYYY-MM');
+  v_month_key := v_b.period_key;
 
   -- 清理上次失败的半成品（只清理本结算点产生的自动数据与次数）
   delete from public.lottery_draws
@@ -5874,8 +5951,9 @@ begin
     raise exception '该周尚未结束，不能汇总';
   end if;
 
+  -- 周分隔点关闭的是「上一周」，周期键必须按关闭的那一周推导（不能用分隔点自身所在周）
   v_key   := v_b.period_key;
-  v_month := to_char((v_b.boundary_at - interval '1 second') at time zone 'Asia/Shanghai', 'YYYY-MM');
+  v_month := coalesce(public.period_key_of('month', v_b.end_date), public.current_month_key());
 
   -- 覆盖：清掉本周期已有结果
   delete from public.weekly_summaries where boundary_id = v_b.id;
@@ -5934,6 +6012,7 @@ begin
     raise exception '该月尚未结束，不能汇总';
   end if;
 
+  -- 月分隔点关闭的是「上一个月」，周期键按被结算的月份推导（settlements.period_key 用的是这个）
   v_key := v_b.period_key;
 
   -- 覆盖：旧结算记录标记为已回滚（保留审计痕迹），清掉该月已生成的次数与自动抽选
@@ -6163,32 +6242,37 @@ begin
   end if;
 
   if p_type = 'week' then
-    select coalesce(jsonb_agg(x order by x->>'boundary_at' desc), '[]'::jsonb) into v_list
+    -- 只列「已结束」的周（进行中的周还没有汇总意义）
+    select coalesce(jsonb_agg(x order by (x->>'start_date') desc), '[]'::jsonb) into v_list
       from (
         select jsonb_build_object(
+                 'type', 'week',
                  'period_key', b.period_key,
+                 'start_date', b.start_date,
+                 'end_date', b.end_date,
                  'boundary_id', b.id,
                  'boundary_at', b.boundary_at,
                  'settled', b.settled,
+                 'rule_weeks', b.rule_weeks,
                  'has_summary', exists (select 1 from public.weekly_summaries w where w.boundary_id = b.id),
                  'label', b.label
                ) as x
           from public.boundaries b
          where b.type = 'week'
-           and b.boundary_at <= now()
-         order by b.boundary_at desc
+           and b.start_date is not null
+           and coalesce(b.end_date, b.start_date) < public.bj_today()
+         order by b.start_date desc
          limit greatest(coalesce(p_limit, 60), 1)
       ) q;
   else
-    -- 月分隔点：结算的是“刚结束的那个月”，所以对外的 period_key 用结算月（分隔点所在月 - 1 个月）
-    select coalesce(jsonb_agg(x order by x->>'boundary_at' desc), '[]'::jsonb) into v_list
+    -- 月：含「进行中」的那一个（end_date 为空），方便前端显示「开始日期 ~ 进行中」
+    select coalesce(jsonb_agg(x order by (x->>'start_date') desc nulls last), '[]'::jsonb) into v_list
       from (
         select jsonb_build_object(
-                 'period_key', coalesce(
-                     (select s.period_key from public.settlements s
-                       where s.boundary_id = b.id and s.status <> 'rolled_back'
-                       order by s.started_at desc limit 1),
-                     to_char((b.boundary_at at time zone 'Asia/Shanghai') - interval '1 month', 'YYYY-MM')),
+                 'type', 'month',
+                 'period_key', b.period_key,
+                 'start_date', b.start_date,
+                 'end_date', b.end_date,
                  'boundary_id', b.id,
                  'boundary_at', b.boundary_at,
                  'settled', b.settled,
@@ -6201,8 +6285,9 @@ begin
                ) as x
           from public.boundaries b
          where b.type = 'month'
-           and b.boundary_at <= now()
-         order by b.boundary_at desc
+           and b.start_date is not null
+           and (b.end_date is not null or b.start_date <= public.bj_today())
+         order by (b.end_date is null) desc, b.start_date desc
          limit greatest(coalesce(p_limit, 60), 1)
       ) q;
   end if;
@@ -6240,7 +6325,8 @@ begin
 
   if p_type = 'week' then
     select * into v_bd from public.boundaries
-     where type = 'week' and period_key = v_key and boundary_at <= now()
+     where type = 'week' and boundary_at <= now()
+      and period_key = v_key
      order by boundary_at desc limit 1;
     if v_bd.id is null then
       raise exception '找不到周「%」的分隔点', v_key;
@@ -6493,7 +6579,7 @@ begin
       left join (
         select l.student_id, sum(l.change_amount)::int as month_change
           from public.starlight_logs l
-         where to_char(l.created_at at time zone 'Asia/Shanghai', 'YYYY-MM') = v_month
+         where l.period_key = v_month
          group by l.student_id
       ) mc on mc.student_id = s.id
       left join (
@@ -6625,7 +6711,7 @@ begin
     (student_id, change_amount, source, period_key, note, operator_id, created_at)
   values
     (p_student_id, p_change_amount, 'manual',
-     to_char(v_at at time zone 'Asia/Shanghai', 'YYYY-MM'), v_note, auth.uid(), v_at)
+     coalesce(public.period_key_of('month', (v_at at time zone 'Asia/Shanghai')::date), public.current_month_key()), v_note, auth.uid(), v_at)
   returning * into v_log;
 
   v_balance := public._recalc_starlight(p_student_id);
@@ -6688,7 +6774,7 @@ begin
      set change_amount = v_amount,
          note          = v_note,
          created_at    = v_at,
-         period_key    = to_char(v_at at time zone 'Asia/Shanghai', 'YYYY-MM')
+         period_key    = coalesce(public.period_key_of('month', (v_at at time zone 'Asia/Shanghai')::date), public.current_month_key())
    where l.id = p_log_id
    returning * into v_log;
 
@@ -6858,7 +6944,7 @@ begin
         continue;
       end if;
 
-      v_key := to_char(v_recdate, 'YYYY-MM');
+      v_key := coalesce(public.period_key_of('month', v_recdate), public.current_month_key());
       insert into public.records (
         id, student_id, score_type, category, reason, points,
         recorder_id, record_date, status, evidence,
@@ -6971,7 +7057,7 @@ begin
         end;
       end if;
 
-      v_mk := to_char(v_at at time zone 'Asia/Shanghai', 'YYYY-MM');
+      v_mk := coalesce(public.period_key_of('month', (v_at at time zone 'Asia/Shanghai')::date), public.current_month_key());
       insert into public.starlight_logs (student_id, change_amount, source, period_key, note, created_at)
       values (v_stu_id, v_amt, 'manual', v_mk, coalesce(v_note, '导入'), v_at);
       v_ok := v_ok + 1;
@@ -7467,6 +7553,767 @@ revoke all on function public.admin_grant_cards(text, uuid, uuid[], text, text) 
 grant execute on function public.admin_grant_cards(text, uuid, uuid[], text, text) to authenticated;
 
 -- ============================================================
+-- 6.4 周期结算调整（V2.0.14）
+--   周结算只出汇总快照；小组抽奖改为「人工选择小组」由执行小组及以上操作
+--   月度个人结算保持原规则（含奖励/惩罚次数与自动抽选）
+-- ============================================================
+
+-- ------------------------------------------------------------
+-- 6.4.1 周小组抽奖看板：本周小组排名 + 建议名单 + 已抽状态
+-- ------------------------------------------------------------
+create or replace function public.admin_group_week_board(p_week_key text default null)
+returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  v_role   text := public.caller_role();
+  v_key    text := nullif(btrim(coalesce(p_week_key, '')), '');
+  v_b      public.boundaries;
+  v_sum    public.weekly_summaries;
+  v_groups jsonb;
+  v_items  jsonb;
+  v_top    int := 3;
+  v_bottom int := 2;
+  v_cnt    int := 0;
+  v_start  timestamptz;
+  v_end    timestamptz;
+begin
+  if v_role not in ('system', 'super_admin', 'admin', 'executive') then
+    raise exception '只有执行小组及以上可以查看小组抽奖看板';
+  end if;
+  if v_key is null then
+    select b.* into v_b from public.boundaries b
+     where b.type = 'week' and b.deprecated = false and b.end_date is not null
+       and b.boundary_at <= now()
+     order by b.end_date desc limit 1;
+    if v_b.id is null then
+      raise exception '还没有已结束的周周期，请先在「设置 → 周期定义」补全';
+    end if;
+    v_key := v_b.period_key;
+  else
+    select b.* into v_b from public.boundaries b
+     where b.type = 'week' and b.deprecated = false and b.period_key = v_key
+     order by b.start_date desc limit 1;
+  end if;
+
+  if v_b.id is null then
+    v_start := now() - interval '7 days';
+    v_end   := now();
+    select coalesce((public.cfg()->>'week_reward_top_groups')::int, 3),
+           coalesce((public.cfg()->>'week_penalty_bottom_groups')::int, 2)
+      into v_top, v_bottom;
+    select coalesce(jsonb_agg(jsonb_build_object(
+             'group_name', g.group_name, 'total', g.total, 'rank', g.rnk, 'pos', g.pos) order by g.pos), '[]'::jsonb)
+      into v_groups
+      from (
+        select q.group_name, sum(q.total) as total,
+               rank() over (order by sum(q.total) desc) as rnk,
+               row_number() over (order by sum(q.total) desc, q.group_name) as pos
+          from (
+            select s.group_name, coalesce(r.total, 0) as total
+              from public.students s
+              left join (
+                select rec.student_id, sum(rec.points) as total
+                  from public.records rec
+                 where rec.status = '正常'
+                   and rec.record_date >= to_char((v_start at time zone 'Asia/Shanghai')::date, 'YYYY-MM-DD')
+                   and rec.record_date <  to_char((v_end at time zone 'Asia/Shanghai')::date, 'YYYY-MM-DD')
+                 group by rec.student_id) r on r.student_id = s.id
+          ) q
+         group by q.group_name) g;
+  else
+    v_start := v_b.start_date::timestamp at time zone 'Asia/Shanghai';
+    v_end   := (v_b.end_date + 1)::timestamp at time zone 'Asia/Shanghai';
+    select coalesce((public.cfg()->>'week_reward_top_groups')::int, 3),
+           coalesce((public.cfg()->>'week_penalty_bottom_groups')::int, 2)
+      into v_top, v_bottom;
+
+    select * into v_sum from public.weekly_summaries w
+     where w.boundary_id = v_b.id
+     order by w.created_at desc limit 1;
+    if v_sum.id is not null then
+      v_groups := coalesce(v_sum.summary->'groups', '[]'::jsonb);
+    else
+      select coalesce(jsonb_agg(jsonb_build_object(
+               'group_name', g.group_name, 'total', g.total, 'rank', g.rnk, 'pos', g.pos) order by g.pos), '[]'::jsonb)
+        into v_groups
+        from (
+          select q.group_name, sum(q.total) as total,
+                 rank() over (order by sum(q.total) desc) as rnk,
+                 row_number() over (order by sum(q.total) desc, q.group_name) as pos
+            from (
+              select s.group_name, coalesce(r.total, 0) as total
+                from public.students s
+                left join (
+                  select rec.student_id, sum(rec.points) as total
+                    from public.records rec
+                   where rec.status = '正常'
+                     and rec.record_date >= to_char(v_b.start_date, 'YYYY-MM-DD')
+                     and rec.record_date <= to_char(v_b.end_date, 'YYYY-MM-DD')
+                   group by rec.student_id) r on r.student_id = s.id
+            ) q
+           group by q.group_name) g;
+    end if;
+  end if;
+
+  v_cnt := jsonb_array_length(v_groups);
+
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'group_name', x.group_name,
+           'total', x.total,
+           'rank', x."rank",
+           'pos', x.pos,
+           'members', (select count(*) from public.students s where s.group_name = x.group_name),
+           'reward_suggested', (x.pos <= v_top),
+           'penalty_suggested', (v_cnt >= v_top + v_bottom and x.pos > v_cnt - v_bottom and x.pos > v_top),
+           'reward_drawn', exists(select 1 from public.lottery_draws d
+                                   where d.group_name = x.group_name and d.pool_type = 'reward'
+                                     and d.source_week_key = v_key and d.status <> 'void'
+                                     and d.is_group = true),
+           'penalty_drawn', exists(select 1 from public.lottery_draws d
+                                    where d.group_name = x.group_name and d.pool_type = 'penalty'
+                                      and d.source_week_key = v_key and d.status <> 'void'
+                                      and d.is_group = true),
+           'reward_item', (select d.item_snapshot->>'title' from public.lottery_draws d
+                            where d.group_name = x.group_name and d.pool_type = 'reward'
+                              and d.source_week_key = v_key and d.status <> 'void'
+                              and d.is_group = true order by d.drawn_at limit 1),
+           'penalty_item', (select d.item_snapshot->>'title' from public.lottery_draws d
+                             where d.group_name = x.group_name and d.pool_type = 'penalty'
+                               and d.source_week_key = v_key and d.status <> 'void'
+                               and d.is_group = true order by d.drawn_at limit 1),
+           'reward_at', (select max(d.drawn_at) from public.lottery_draws d
+                          where d.group_name = x.group_name and d.pool_type = 'reward'
+                            and d.source_week_key = v_key and d.status <> 'void'
+                            and d.is_group = true),
+           'penalty_at', (select max(d.drawn_at) from public.lottery_draws d
+                           where d.group_name = x.group_name and d.pool_type = 'penalty'
+                             and d.source_week_key = v_key and d.status <> 'void'
+                             and d.is_group = true)
+         ) order by x.pos), '[]'::jsonb)
+    into v_items
+    from jsonb_to_recordset(v_groups) as x(group_name text, total numeric, "rank" int, pos int);
+
+  return jsonb_build_object(
+    'week_key', v_key,
+    'range_start', v_start,
+    'range_end', v_end,
+    'has_summary', (v_sum.id is not null),
+    'top_n', v_top,
+    'bottom_n', v_bottom,
+    'group_count', v_cnt,
+    'groups', coalesce(v_items, '[]'::jsonb),
+    'week_options', coalesce((
+      select jsonb_agg(jsonb_build_object(
+               'week_key', w.period_key,
+               'range_start', w.start_date::timestamp at time zone 'Asia/Shanghai',
+               'range_end', (w.end_date + 1)::timestamp at time zone 'Asia/Shanghai',
+               'has_summary', exists(select 1 from public.weekly_summaries ws where ws.boundary_id = w.id))
+             order by w.end_date desc)
+        from (select b.id, b.period_key, b.start_date, b.end_date from public.boundaries b
+               where b.type = 'week' and b.deprecated = false and b.end_date is not null
+                 and b.boundary_at <= now()
+               order by b.end_date desc limit 12) w
+    ), '[]'::jsonb));
+end;
+$$;
+revoke all on function public.admin_group_week_board(text) from public, anon, authenticated;
+grant execute on function public.admin_group_week_board(text) to authenticated;
+
+-- ------------------------------------------------------------
+-- 6.4.2 人工小组抽奖：执行小组及以上为指定小组抽奖（每组每池每周限一次）
+--   奖励：全组每人各得一份（星光卡每人入账）；惩罚：一条结果全组共担
+-- ------------------------------------------------------------
+create or replace function public.admin_draw_group_manual(
+  p_group_name text,
+  p_pool_type  text default 'reward',
+  p_week_key   text default null,
+  p_note       text default null
+) returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  v_role    text := public.caller_role();
+  v_group   text := nullif(btrim(coalesce(p_group_name, '')), '');
+  v_pool    text := lower(coalesce(nullif(btrim(coalesce(p_pool_type, '')), ''), 'reward'));
+  v_key     text;
+  v_b       public.boundaries;
+  v_start   timestamptz;
+  v_end     timestamptz;
+  v_period  text;
+  v_source  text;
+  v_members jsonb;
+  v_item    public.lottery_items;
+  v_prev_at timestamptz;
+  v_prev_by text;
+  v_prev_it text;
+  v_prof    uuid;
+  v_draw    uuid;
+  v_ids     uuid[] := '{}';
+  v_cnt     int := 0;
+  v_label   text;
+begin
+  if v_role not in ('system', 'super_admin', 'admin', 'executive') then
+    raise exception '只有执行小组及以上权限可以为小组抽奖';
+  end if;
+  if public.is_maintenance() then
+    raise exception '系统月度结算维护中，暂时不能抽选';
+  end if;
+  if v_group is null then
+    raise exception '请选择小组';
+  end if;
+  if v_pool not in ('reward', 'penalty') then
+    raise exception '奖池类型不合法';
+  end if;
+  v_label := case when v_pool = 'reward' then '奖励' else '惩罚' end;
+
+  -- 默认取「最近一个已关闭的周」（与看板一致；当前周未结束不能抽奖）
+  v_key := coalesce(nullif(btrim(coalesce(p_week_key, '')), ''), (
+    select b.period_key
+      from public.boundaries b
+     where b.type = 'week' and b.boundary_at <= now()
+     order by b.boundary_at desc limit 1), public.current_week_key());
+  select * into v_b from public.boundaries b
+   where b.type = 'week'
+     and b.period_key = v_key
+   order by b.boundary_at desc limit 1;
+  if v_b.id is null then
+    raise exception '周「%」不存在，请先在设置里立即分隔或选择其它周', v_key;
+  end if;
+  if v_b.boundary_at > now() then
+    raise exception '周「%」尚未结束，请等该周汇总完成后再为小组抽奖', v_key;
+  end if;
+  v_end := v_b.boundary_at;
+  v_start := coalesce(
+    (select max(b.boundary_at) from public.boundaries b
+      where b.type = 'week' and b.boundary_at < v_end),
+    v_end - interval '7 days');
+  v_period := coalesce(public.period_key_of('month', v_b.end_date), public.current_month_key());
+  v_source := case when v_pool = 'reward' then 'weekly_group_manual_reward' else 'weekly_group_manual_penalty' end;
+
+  if not exists (select 1 from public.students s where s.group_name = v_group) then
+    raise exception '小组「%」下没有学生', v_group;
+  end if;
+
+  perform pg_advisory_xact_lock(hashtext('group_manual_draw:' || v_group || ':' || v_pool || ':' || v_key));
+
+  select d.drawn_at,
+         coalesce(pr.name, '—'),
+         coalesce(nullif(d.item_snapshot->>'title', ''), d.note, '')
+    into v_prev_at, v_prev_by, v_prev_it
+    from public.lottery_draws d
+    left join public.profiles pr on pr.id = d.drawn_by
+   where d.is_group and d.group_name = v_group and d.pool_type = v_pool
+     and d.status <> 'void'
+     and (d.source_week_key = v_key
+          or (coalesce(d.source_week_key, '') = ''
+              and d.drawn_at >= v_start and d.drawn_at < v_end))
+   order by d.drawn_at limit 1;
+  if v_prev_at is not null then
+    raise exception '「%」小组本周的%抽奖已于 % 完成（结果：%），每组每池每周只能抽一次；如需重抽请先在「仓库管理」作废上次结果',
+      v_group, v_label,
+      to_char(v_prev_at at time zone 'Asia/Shanghai', 'MM-DD HH24:MI'),
+      coalesce(nullif(v_prev_it, ''), '未记录');
+  end if;
+
+  v_item := public._pick_lottery_item(v_pool);
+  if v_item.id is null then
+    raise exception '%池当前没有启用的卡片，请先到「奖惩抽选 → 奖池管理」启用', v_label;
+  end if;
+
+  v_members := to_jsonb(public.group_members(v_group));
+  for v_prof in
+    select s.id from public.students s where s.group_name = v_group order by s.created_at, s.id
+  loop
+    v_draw := public._apply_draw(
+      v_prof, v_pool, v_item.id, v_period, v_source, v_group, v_members, true,
+      coalesce(nullif(btrim(coalesce(p_note, '')), ''), format('%s 周小组抽奖（人工）', v_key)),
+      auth.uid(), false);
+    v_ids := v_ids || v_draw;
+    v_cnt := v_cnt + 1;
+  end loop;
+
+  -- 标记这些结果所属的目标周（用于「每组每池每周限一次」判定）
+  update public.lottery_draws set source_week_key = v_key where id = any(v_ids);
+
+  for v_prof in
+    select p.id from public.profiles p
+      join public.students s on s.id = p.student_id
+     where s.group_name = v_group and p.status = 'active'
+  loop
+    perform public.notify(v_prof, '小组抽奖结果',
+      format('你所在的「%s」小组本周抽中（%s）：%s', v_group, v_label, v_item.title),
+      'lottery', 'lottery_draw', v_ids[1]);
+  end loop;
+
+  perform public.write_audit('admin_draw_group_manual', 'lottery_draw',
+    case when array_length(v_ids, 1) > 0 then v_ids[1]::text else null end,
+    jsonb_build_object('group_name', v_group, 'pool', v_pool, 'week_key', v_key,
+                       'period_key', v_period, 'members', v_cnt, 'item', v_item.title));
+
+  return jsonb_build_object(
+    'ok', true,
+    'group_name', v_group,
+    'week_key', v_key,
+    'period_key', v_period,
+    'pool_type', v_pool,
+    'item', to_jsonb(v_item),
+    'members', v_cnt,
+    'draws', (select coalesce(jsonb_agg(to_jsonb(d) order by d.drawn_at), '[]'::jsonb)
+                from public.lottery_draws d where d.id = any(v_ids)));
+end;
+$$;
+revoke all on function public.admin_draw_group_manual(text, text, text, text) from public, anon, authenticated;
+grant execute on function public.admin_draw_group_manual(text, text, text, text) to authenticated;
+
+-- ============================================================
+-- 8.5 V2.0.19 周期定义（周 / 月起止日期 + 规则计分周）
+--    设计：开发文件/docs/周期定义改造方案_V2.0.17.md
+--    · 周：直接设置起止日期（可跨自然月），相邻周首尾相接
+--    · 月：两段式——先设起始（进行中，结束日期为空），再设结束；
+--          结束日+1 自动成为下月起始日；月起止必须落在周边界上
+--    · 规则计分周：该周按 N 个规则计分周计算（上限 ×N）
+--    · period_key = 起始日期（如 2026-10-26），周期结束不改变键
+-- ============================================================
+
+-- ------------------------------------------------------------
+-- 8.5.0 日期中文/ISO 显示辅助
+-- ------------------------------------------------------------
+create or replace function public.fmt_cn_date(p_date date)
+returns text
+language sql immutable security definer set search_path = public, extensions as $$
+  select case when p_date is null then '—' else to_char(p_date, 'YYYY-MM-DD') end;
+$$;
+
+-- ------------------------------------------------------------
+-- 8.5.1 周期一致性检查：返回 {ok, issues:[{level,type,detail,start_date}]}
+-- ------------------------------------------------------------
+create or replace function public.admin_validate_periods()
+returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  v_issues jsonb := '[]'::jsonb;
+  v_w      record;
+  v_m      record;
+  v_prev   date;
+begin
+  if public.caller_role() not in ('system', 'super_admin', 'admin', 'executive') then
+    raise exception '没有权限检查周期定义';
+  end if;
+
+  -- 周：时间递进 + 首尾相接
+  v_prev := null;
+  for v_w in
+    select b.* from public.boundaries b
+     where b.type = 'week' and b.deprecated = false and b.start_date is not null
+     order by b.start_date
+  loop
+    if v_w.end_date is null then
+      v_issues := v_issues || jsonb_build_object('level', 'error', 'type', 'week',
+        'start_date', v_w.start_date, 'detail', '周周期缺少结束日期');
+    elsif v_w.end_date < v_w.start_date then
+      v_issues := v_issues || jsonb_build_object('level', 'error', 'type', 'week',
+        'start_date', v_w.start_date, 'detail', '结束日期早于起始日期');
+    end if;
+    if v_prev is not null and v_w.start_date <> v_prev + 1 then
+      v_issues := v_issues || jsonb_build_object('level', 'error', 'type', 'week',
+        'start_date', v_w.start_date, 'detail',
+        format('与前一周不连续：上一周结束于 %s，本周开始于 %s', v_prev, v_w.start_date));
+    end if;
+    v_prev := v_w.end_date;
+  end loop;
+
+  -- 月：起止必须落在周边界
+  for v_m in
+    select b.* from public.boundaries b
+     where b.type = 'month' and b.deprecated = false and b.start_date is not null
+     order by b.start_date
+  loop
+    if not exists (select 1 from public.boundaries w
+                    where w.type = 'week' and w.deprecated = false and w.start_date = v_m.start_date) then
+      v_issues := v_issues || jsonb_build_object('level', 'error', 'type', 'month',
+        'start_date', v_m.start_date, 'detail', '月起始日不在任何周周期的起始日上');
+    end if;
+    if v_m.end_date is not null and not exists (
+         select 1 from public.boundaries w
+          where w.type = 'week' and w.deprecated = false and w.start_date = v_m.end_date + 1) then
+      v_issues := v_issues || jsonb_build_object('level', 'error', 'type', 'month',
+        'start_date', v_m.start_date, 'detail', '月结束日的下一天不是任何周周期的起始日');
+    end if;
+    if v_m.end_date is not null and v_m.end_date < v_m.start_date then
+      v_issues := v_issues || jsonb_build_object('level', 'error', 'type', 'month',
+        'start_date', v_m.start_date, 'detail', '月结束日期早于起始日期');
+    end if;
+  end loop;
+
+  -- 月之间：只能有一个进行中，且相邻月必须首尾相接
+  if (select count(*) from public.boundaries
+       where type = 'month' and deprecated = false and end_date is null) > 1 then
+    v_issues := v_issues || jsonb_build_object('level', 'error', 'type', 'month',
+      'detail', '存在多个「进行中」的月周期，最多只能有一个');
+  end if;
+  for v_m in
+    select b.*, lag(b.end_date) over (order by b.start_date) as prev_end
+      from public.boundaries b
+     where b.type = 'month' and b.deprecated = false and b.start_date is not null
+  loop
+    if v_m.prev_end is not null and v_m.start_date <> v_m.prev_end + 1 then
+      v_issues := v_issues || jsonb_build_object('level', 'warn', 'type', 'month',
+        'start_date', v_m.start_date, 'detail',
+        format('与上一个月不连续：上一月结束于 %s，本月开始于 %s', v_m.prev_end, v_m.start_date));
+    end if;
+  end loop;
+
+  return jsonb_build_object(
+    'ok', jsonb_array_length(v_issues) = 0,
+    'issue_count', jsonb_array_length(v_issues),
+    'issues', v_issues
+  );
+end;
+$$;
+
+-- ------------------------------------------------------------
+-- 8.5.2 设置/修改周期
+--   p_type: week | month
+--   p_start: 起始日期（周一或任意，但月必须是某个周的起始日）
+--   p_end:   结束日期（含当天）；week 必填，month 可为空 = 进行中
+--   p_rule_weeks: 该周按几个「规则计分周」算（1~4，默认 1）
+-- ------------------------------------------------------------
+create or replace function public.admin_set_period(
+  p_type text,
+  p_start date,
+  p_end date default null,
+  p_rule_weeks int default 1
+) returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  v_role   text := public.caller_role();
+  v_id     uuid;
+  v_b      public.boundaries;
+  v_prev   public.boundaries;
+  v_next   public.boundaries;
+  v_pk     text;
+  v_at     timestamptz;
+  v_weeks  int := coalesce(p_rule_weeks, 1);
+  v_new    public.boundaries;
+begin
+  if v_role not in ('system', 'super_admin') then
+    raise exception '只有管理员可以修改周期定义';
+  end if;
+  if p_type not in ('week', 'month') then
+    raise exception '周期类型只能是 week 或 month';
+  end if;
+  if p_start is null then
+    raise exception '请选择起始日期';
+  end if;
+  if v_weeks < 1 or v_weeks > 4 then
+    raise exception '规则计分周只能是 1~4';
+  end if;
+
+  if p_type = 'week' then
+    if p_end is null then
+      raise exception '周周期需要填写结束日期';
+    end if;
+    if p_end < p_start then
+      raise exception '结束日期不能早于起始日期';
+    end if;
+    if (p_end - p_start) > 27 then
+      raise exception '一周最多 28 天，请检查日期';
+    end if;
+    v_prev := (select b from public.boundaries b
+                where b.type = 'week' and b.deprecated = false and b.end_date is not null
+                  and b.end_date < p_start
+                order by b.end_date desc limit 1);
+    if v_prev.id is not null and v_prev.end_date + 1 <> p_start then
+      raise exception '与前一周不连续：上一周结束于 %，本周应从 % 开始',
+        public.fmt_cn_date(v_prev.end_date), public.fmt_cn_date(v_prev.end_date + 1);
+    end if;
+    v_next := (select b from public.boundaries b
+                where b.type = 'week' and b.deprecated = false
+                  and b.start_date > p_start
+                order by b.start_date limit 1);
+    if v_next.id is not null and v_next.start_date - 1 <> p_end then
+      raise exception '与后一周重叠或留空：下一周开始于 %，本周应结束于 %',
+        public.fmt_cn_date(v_next.start_date), public.fmt_cn_date(v_next.start_date - 1);
+    end if;
+  else
+    -- 月：起止必须落在周边界上
+    if not exists (select 1 from public.boundaries w
+                    where w.type = 'week' and w.deprecated = false and w.start_date = p_start) then
+      raise exception '月起始日必须是某个周周期的第一天（当前不是），请先设置对应的周';
+    end if;
+    if p_end is not null then
+      if p_end < p_start then
+        raise exception '结束日期不能早于起始日期';
+      end if;
+      if not exists (select 1 from public.boundaries w
+                      where w.type = 'week' and w.deprecated = false and w.start_date = p_end + 1) then
+        raise exception '月结束日的下一天必须是某个周周期的第一天，请把结束日设为该周的周日';
+      end if;
+    end if;
+    v_prev := (select b from public.boundaries b
+                where b.type = 'month' and b.deprecated = false and b.start_date < p_start
+                order by b.start_date desc limit 1);
+    if v_prev.id is not null then
+      if v_prev.end_date is null then
+        if p_end is not null then
+          raise exception '上一个月（% 起）还在进行中，请先为它设置结束日期',
+            public.fmt_cn_date(v_prev.start_date);
+        else
+          raise exception '已有一个进行中的月周期（% 起），不能再开新的',
+            public.fmt_cn_date(v_prev.start_date);
+        end if;
+      elsif v_prev.end_date + 1 <> p_start then
+        raise exception '与上一个月不连续：上一月结束于 %，本月应从 % 开始',
+          public.fmt_cn_date(v_prev.end_date), public.fmt_cn_date(v_prev.end_date + 1);
+      end if;
+    end if;
+    v_next := (select b from public.boundaries b
+                where b.type = 'month' and b.deprecated = false and b.start_date > p_start
+                order by b.start_date limit 1);
+    if v_next.id is not null and p_end is not null and v_next.start_date <> p_end + 1 then
+      raise exception '与下一个月重叠或留空：下一月开始于 %，本月应结束于 %',
+        public.fmt_cn_date(v_next.start_date), public.fmt_cn_date(v_next.start_date - 1);
+    end if;
+    if v_next.id is not null and p_end is null then
+      raise exception '后面已经有月周期（% 起），不能把本月设成进行中', public.fmt_cn_date(v_next.start_date);
+    end if;
+  end if;
+
+  v_pk := to_char(p_start, 'YYYY-MM-DD');
+  v_at := case when p_end is null then null
+               else (p_end + 1)::timestamp at time zone 'Asia/Shanghai' end;
+
+  select * into v_b from public.boundaries
+   where type = p_type and start_date = p_start;
+  if v_b.id is null then
+    insert into public.boundaries (type, period_key, boundary_at, label, is_manual,
+                                   start_date, end_date, rule_weeks, settled)
+    values (p_type, v_pk, v_at,
+            case when p_type = 'week' then '周 ' || v_pk else '月 ' || v_pk end,
+            true, p_start, p_end,
+            case when p_type = 'week' then v_weeks else 1 end,
+            false)
+    returning * into v_new;
+  else
+    update public.boundaries
+       set period_key = v_pk,
+           boundary_at = v_at,
+           end_date = p_end,
+           rule_weeks = case when p_type = 'week' then v_weeks else 1 end,
+           label = case when p_type = 'week' then '周 ' || v_pk else '月 ' || v_pk end,
+           is_manual = true,
+           settled = false
+     where id = v_b.id
+     returning * into v_new;
+  end if;
+
+  -- 关闭上一个月（写入结束日期）时，自动把下一月的起始日补上
+  if p_type = 'month' and p_end is not null then
+    if not exists (select 1 from public.boundaries w
+                    where w.type = 'month' and w.deprecated = false and w.start_date = p_end + 1) then
+      v_pk := to_char(p_end + 1, 'YYYY-MM-DD');
+      insert into public.boundaries (type, period_key, boundary_at, label, is_manual,
+                                     start_date, end_date, rule_weeks, settled)
+      values ('month', v_pk, null, '月 ' || v_pk, true, p_end + 1, null, 1, false);
+    end if;
+  end if;
+
+  perform public.write_audit('set_period', p_type, v_new.id::text,
+    jsonb_build_object('start_date', p_start, 'end_date', p_end, 'rule_weeks', v_weeks));
+
+  return jsonb_build_object('ok', true, 'period', to_jsonb(v_new));
+end;
+$$;
+
+-- ------------------------------------------------------------
+-- 8.5.3 关闭「进行中」的月：结束日默认取本周周日（所在周的 end_date）
+-- ------------------------------------------------------------
+create or replace function public.admin_close_period(p_end date default null)
+returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  v_b    public.boundaries;
+  v_end  date;
+  v_res  jsonb;
+begin
+  if public.caller_role() not in ('system', 'super_admin') then
+    raise exception '只有管理员可以关闭月周期';
+  end if;
+  select * into v_b from public.boundaries
+   where type = 'month' and deprecated = false and end_date is null
+   order by start_date desc limit 1;
+  if v_b.id is null then
+    raise exception '当前没有进行中的月周期';
+  end if;
+  v_end := coalesce(p_end, (select w.end_date from public.boundaries w
+                             where w.type = 'week' and w.deprecated = false
+                               and w.start_date <= public.bj_today()
+                             order by w.start_date desc limit 1));
+  if v_end is null then
+    raise exception '找不到可用的周周期，请先设置周周期';
+  end if;
+  if v_end < v_b.start_date then
+    raise exception '结束日期不能早于本月的起始日期 %', public.fmt_cn_date(v_b.start_date);
+  end if;
+  v_res := public.admin_set_period('month', v_b.start_date, v_end, 1);
+  perform public.notify_audience('admins', '月周期已关闭',
+    format('月周期 %s ~ %s 已关闭，可进行月度结算', public.fmt_cn_date(v_b.start_date), public.fmt_cn_date(v_end)),
+    'system', 'boundaries', v_b.id);
+  return v_res;
+end;
+$$;
+
+-- ------------------------------------------------------------
+-- 8.5.4 补周：在 [p_from, p_to] 之间按 7 天一段补周周期（需与前后衔接）
+-- ------------------------------------------------------------
+create or replace function public.admin_fill_weeks(p_from date, p_to date)
+returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  v_role text := public.caller_role();
+  v_d    date := p_from;
+  v_cnt  int := 0;
+  v_last public.boundaries;
+begin
+  if v_role not in ('system', 'super_admin') then
+    raise exception '只有管理员可以补周周期';
+  end if;
+  if p_from is null or p_to is null or p_to < p_from then
+    raise exception '补周区间不合法';
+  end if;
+  if (p_to - p_from) > 400 then
+    raise exception '一次最多补 400 天，请分段执行';
+  end if;
+  while v_d <= p_to loop
+    if not exists (select 1 from public.boundaries w
+                    where w.type = 'week' and w.deprecated = false
+                      and w.start_date <= v_d and coalesce(w.end_date, w.start_date) >= v_d) then
+      insert into public.boundaries (type, period_key, boundary_at, label, is_manual,
+                                     start_date, end_date, rule_weeks, settled)
+      values ('week', to_char(v_d, 'YYYY-MM-DD'),
+              (v_d + 7)::timestamp at time zone 'Asia/Shanghai',
+              '周 ' || to_char(v_d, 'YYYY-MM-DD'), true, v_d, v_d + 6, 1, false)
+      on conflict (type, start_date) where start_date is not null do nothing;
+      v_cnt := v_cnt + 1;
+    end if;
+    v_d := v_d + 7;
+  end loop;
+  perform public.write_audit('fill_weeks', 'week', null,
+    jsonb_build_object('from', p_from, 'to', p_to, 'created', v_cnt));
+  return jsonb_build_object('ok', true, 'created', v_cnt,
+                            'validate', public.admin_validate_periods());
+end;
+$$;
+
+-- ------------------------------------------------------------
+-- 8.5.5 删除周期（仅未结算、区间内无记录）
+-- ------------------------------------------------------------
+create or replace function public.admin_delete_period(p_id uuid)
+returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  v_b   public.boundaries;
+  v_n   int := 0;
+begin
+  if public.caller_role() not in ('system', 'super_admin') then
+    raise exception '只有管理员可以删除周期';
+  end if;
+  select * into v_b from public.boundaries where id = p_id;
+  if v_b.id is null then
+    raise exception '周期不存在';
+  end if;
+  if v_b.settled then
+    raise exception '该周期已结算/已汇总，不能删除';
+  end if;
+  if v_b.end_date is not null then
+    select count(*) into v_n from public.records
+     where status = '正常'
+       and record_date >= to_char(v_b.start_date, 'YYYY-MM-DD')
+       and record_date <= to_char(v_b.end_date, 'YYYY-MM-DD');
+    if v_n > 0 then
+      raise exception '该周期内有 % 条积分记录，不能删除', v_n;
+    end if;
+  end if;
+  if v_b.type = 'month' and exists (select 1 from public.boundaries w
+                                     where w.type = 'month' and w.deprecated = false
+                                       and w.start_date = v_b.end_date + 1) then
+    raise exception '后面还有月周期，不能删除本月（会断开连续性）';
+  end if;
+  delete from public.boundaries where id = p_id;
+  perform public.write_audit('delete_period', v_b.type, p_id::text,
+    jsonb_build_object('start_date', v_b.start_date, 'end_date', v_b.end_date));
+  return jsonb_build_object('ok', true);
+end;
+$$;
+
+-- ------------------------------------------------------------
+-- 8.5.6 周期列表（前端周期定义页）
+-- ------------------------------------------------------------
+create or replace function public.list_periods(p_type text default 'week', p_limit int default 40)
+returns jsonb
+language plpgsql security definer set search_path = public, extensions as $$
+declare
+  v_role text := public.caller_role();
+  v_rows jsonb;
+begin
+  if v_role not in ('system', 'super_admin', 'admin', 'executive') then
+    raise exception '没有权限查看周期定义';
+  end if;
+  select coalesce(jsonb_agg(x order by x->>'start_date' desc), '[]'::jsonb)
+    into v_rows
+    from (
+      select jsonb_build_object(
+               'id', b.id,
+               'type', b.type,
+               'period_key', b.period_key,
+               'start_date', b.start_date,
+               'end_date', b.end_date,
+               'rule_weeks', b.rule_weeks,
+               'settled', b.settled,
+               'is_manual', b.is_manual,
+               'ongoing', (b.end_date is null),
+               'records_count', case
+                 when b.end_date is null then (
+                   select count(*) from public.records r
+                    where r.status = '正常'
+                      and r.record_date >= to_char(b.start_date, 'YYYY-MM-DD'))
+                 else (
+                   select count(*) from public.records r
+                    where r.status = '正常'
+                      and r.record_date >= to_char(b.start_date, 'YYYY-MM-DD')
+                      and r.record_date <= to_char(b.end_date, 'YYYY-MM-DD'))
+               end
+             ) as x
+        from public.boundaries b
+       where b.type = p_type and b.deprecated = false and b.start_date is not null
+       order by b.start_date desc
+       limit greatest(coalesce(p_limit, 40), 1)
+    ) q;
+  return jsonb_build_object('type', p_type, 'items', v_rows,
+                            'current_key', case when p_type = 'week'
+                                                then public.current_week_key()
+                                                else public.current_month_key() end,
+                            'validate', public.admin_validate_periods());
+end;
+$$;
+
+-- ------------------------------------------------------------
+-- 8.5.7 授权：仅管理员可用
+-- ------------------------------------------------------------
+revoke all on function public.admin_validate_periods() from public, anon;
+revoke all on function public.admin_set_period(text, date, date, int) from public, anon;
+revoke all on function public.admin_close_period(date) from public, anon;
+revoke all on function public.admin_fill_weeks(date, date) from public, anon;
+revoke all on function public.admin_delete_period(uuid) from public, anon;
+revoke all on function public.list_periods(text, int) from public, anon;
+
+grant execute on function public.admin_validate_periods() to authenticated;
+grant execute on function public.admin_set_period(text, date, date, int) to authenticated;
+grant execute on function public.admin_close_period(date) to authenticated;
+grant execute on function public.admin_fill_weeks(date, date) to authenticated;
+grant execute on function public.admin_delete_period(uuid) to authenticated;
+grant execute on function public.list_periods(text, int) to authenticated;
+
+-- ============================================================
 -- 9. 最终权限收口
 --   原则：anon / authenticated 对业务表“零写权限”，只有 select（且受 RLS 限制）；
 --         所有写操作必须走 RPC（security definer）。app_config 连 select 都不给，只走 RPC。
@@ -7529,6 +8376,7 @@ declare
     'mark_draw_used','admin_void_draw','admin_save_lottery_item','admin_delete_lottery_item',
     'weekly_snapshot','monthly_settle','maybe_run_period_jobs','admin_resettle',
   'admin_set_user_positions','admin_run_weekly_summary','admin_run_monthly_summary',
+  'admin_group_week_board','admin_draw_group_manual',
     'admin_edit_boundary','admin_delete_boundaries','admin_create_immediate_boundary',
     'list_weekly_summaries','my_summaries',
     'list_group_chances','draw_group_lottery','list_summary_periods','get_period_summary',

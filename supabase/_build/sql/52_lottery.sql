@@ -215,7 +215,7 @@ begin
     v_is_group := true;
     v_group := p_group_name;
     v_members := to_jsonb(public.group_members(v_group));
-    if v_role in ('super_admin','admin','executive','group_recorder') then
+    if v_role in ('super_admin','admin','executive') then
       v_target := coalesce(p_student_id,
         (select s.id from public.students s where s.group_name = v_group order by s.created_at, s.id limit 1));
     else
@@ -232,9 +232,7 @@ begin
         raise exception '只能给自己抽选';
       end if;
     elsif v_role = 'group_recorder' then
-      if not public.student_in_my_group(v_target) then
-        raise exception '记录员只能代本组学生抽选';
-      end if;
+      raise exception '个人抽选已收回记录员代抽权限，请学生本人抽选，或由执行小组及以上代抽';
     elsif v_role not in ('super_admin','admin','executive') then
       raise exception '没有权限抽选';
     end if;
@@ -759,15 +757,9 @@ begin
     raise exception '奖池类型不合法';
   end if;
 
-  -- 权限：老师/执行小组可代任意组；本组成员（含学生本人、记录员）可代表本组抽选
-  if v_role in ('system','super_admin','admin','executive') then
-    null;
-  elsif v_role in ('group_recorder','student') then
-    if v_group is distinct from public.my_group_name() then
-      raise exception '只能代表自己所在的小组抽选';
-    end if;
-  else
-    raise exception '没有权限进行小组抽选';
+  -- V2.0.14：小组抽奖收回小组记录员/学生的代抽权限，统一由执行小组及以上操作
+  if v_role not in ('system','super_admin','admin','executive') then
+    raise exception '小组抽奖仅限执行小组及以上操作，请在「奖惩抽选」里选择小组由班干部抽取';
   end if;
 
   -- 同一小组同一奖池同一周期串行执行：多人同时点，只有最早一次写入生效

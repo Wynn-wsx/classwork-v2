@@ -106,7 +106,7 @@ begin
         continue;
       end if;
 
-      v_key := to_char(v_recdate, 'YYYY-MM');
+      v_key := coalesce(public.period_key_of('month', v_recdate), public.current_month_key());
       insert into public.records (
         id, student_id, score_type, category, reason, points,
         recorder_id, record_date, status, evidence,
@@ -219,7 +219,7 @@ begin
         end;
       end if;
 
-      v_mk := to_char(v_at at time zone 'Asia/Shanghai', 'YYYY-MM');
+      v_mk := coalesce(public.period_key_of('month', (v_at at time zone 'Asia/Shanghai')::date), public.current_month_key());
       insert into public.starlight_logs (student_id, change_amount, source, period_key, note, created_at)
       values (v_stu_id, v_amt, 'manual', v_mk, coalesce(v_note, '导入'), v_at);
       v_ok := v_ok + 1;

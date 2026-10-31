@@ -21,6 +21,7 @@ declare
     'mark_draw_used','admin_void_draw','admin_save_lottery_item','admin_delete_lottery_item',
     'weekly_snapshot','monthly_settle','maybe_run_period_jobs','admin_resettle',
   'admin_set_user_positions','admin_run_weekly_summary','admin_run_monthly_summary',
+  'admin_group_week_board','admin_draw_group_manual',
     'admin_edit_boundary','admin_delete_boundaries','admin_create_immediate_boundary',
     'list_weekly_summaries','my_summaries',
     'list_group_chances','draw_group_lottery','list_summary_periods','get_period_summary',
