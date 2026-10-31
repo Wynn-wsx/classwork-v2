@@ -2,7 +2,7 @@
 --  班级积分管理系统 V2.0.0 · 数据库增量迁移脚本（V1.6 -> V2.0）
 --  目标项目：Supabase（Postgres 15+）
 --  生成方式：由 _build/build_sql.py 从 _build/sql/ 模块拼接，请勿手改本文件
---  生成时间：2026-11-01 02:33:25
+--  生成时间：2026-11-01 03:06:27
 --
 --  【执行顺序 / 重要提醒】
 --  1) 先备份：Supabase 控制台 → Database → Backups；或在系统内「数据导出」保存一份 JSON。
@@ -54,7 +54,7 @@
 -- is_supervisor_now -> current_week_key）。关闭“创建函数时校验函数体”，
 -- 函数首次被调用时仍会完整校验，不影响运行期正确性。
 set check_function_bodies = off;
---  生成时间：2026-11-01 02:33:25
+--  生成时间：2026-11-01 03:06:27
 
 --  【脚本目录】（在 SQL Editor 里搜索下面的标题文字可快速定位）
 --   1. 扩展（pgcrypto）
@@ -7625,12 +7625,19 @@ begin
     raise exception '只有执行小组及以上可以查看小组抽奖看板';
   end if;
   if v_key is null then
+    -- 优先「今天所在的周」（周未结束也允许抽奖），否则取最近一个已结束的周
     select b.* into v_b from public.boundaries b
      where b.type = 'week' and b.deprecated = false and b.end_date is not null
-       and b.boundary_at <= now()
-     order by b.end_date desc limit 1;
+       and b.start_date <= public.bj_today() and b.end_date >= public.bj_today()
+     order by b.start_date desc limit 1;
     if v_b.id is null then
-      raise exception '还没有已结束的周周期，请先在「设置 → 周期定义」补全';
+      select b.* into v_b from public.boundaries b
+       where b.type = 'week' and b.deprecated = false and b.end_date is not null
+         and b.end_date < public.bj_today()
+       order by b.end_date desc limit 1;
+    end if;
+    if v_b.id is null then
+      raise exception '还没有进行中或已结束的周周期，请先在「设置 → 周期定义」补全';
     end if;
     v_key := v_b.period_key;
   else
@@ -7666,7 +7673,8 @@ begin
          group by q.group_name) g;
   else
     v_start := v_b.start_date::timestamp at time zone 'Asia/Shanghai';
-    v_end   := (v_b.end_date + 1)::timestamp at time zone 'Asia/Shanghai';
+    -- 周未结束时统计到今天（含今天）
+    v_end   := (least(v_b.end_date, public.bj_today()) + 1)::timestamp at time zone 'Asia/Shanghai';
     select coalesce((public.cfg()->>'week_reward_top_groups')::int, 3),
            coalesce((public.cfg()->>'week_penalty_bottom_groups')::int, 2)
       into v_top, v_bottom;
@@ -7692,7 +7700,7 @@ begin
                     from public.records rec
                    where rec.status = '正常'
                      and rec.record_date >= to_char(v_b.start_date, 'YYYY-MM-DD')
-                     and rec.record_date <= to_char(v_b.end_date, 'YYYY-MM-DD')
+                     and rec.record_date <= to_char(least(v_b.end_date, public.bj_today()), 'YYYY-MM-DD')
                    group by rec.student_id) r on r.student_id = s.id
             ) q
            group by q.group_name) g;
@@ -7742,6 +7750,7 @@ begin
     'range_start', v_start,
     'range_end', v_end,
     'has_summary', (v_sum.id is not null),
+    'in_progress', coalesce((v_b.end_date is not null and v_b.end_date > public.bj_today()), false),
     'top_n', v_top,
     'bottom_n', v_bottom,
     'group_count', v_cnt,
@@ -7751,11 +7760,11 @@ begin
                'week_key', w.period_key,
                'range_start', w.start_date::timestamp at time zone 'Asia/Shanghai',
                'range_end', (w.end_date + 1)::timestamp at time zone 'Asia/Shanghai',
-               'has_summary', exists(select 1 from public.weekly_summaries ws where ws.boundary_id = w.id))
+               'has_summary', exists(select 1 from public.weekly_summaries ws where ws.boundary_id = w.id),
+               'in_progress', (w.end_date > public.bj_today()))
              order by w.end_date desc)
         from (select b.id, b.period_key, b.start_date, b.end_date from public.boundaries b
                where b.type = 'week' and b.deprecated = false and b.end_date is not null
-                 and b.boundary_at <= now()
                order by b.end_date desc limit 12) w
     ), '[]'::jsonb));
 end;
@@ -7809,12 +7818,17 @@ begin
   end if;
   v_label := case when v_pool = 'reward' then '奖励' else '惩罚' end;
 
-  -- 默认取「最近一个已关闭的周」（与看板一致；当前周未结束不能抽奖）
+  -- 默认取「今天所在的周」（周未结束也可抽），否则最近一个已结束的周（与看板一致）
   v_key := coalesce(nullif(btrim(coalesce(p_week_key, '')), ''), (
-    select b.period_key
-      from public.boundaries b
-     where b.type = 'week' and b.boundary_at <= now()
-     order by b.boundary_at desc limit 1), public.current_week_key());
+    select coalesce(
+      (select b2.period_key from public.boundaries b2
+        where b2.type = 'week' and b2.deprecated = false
+          and b2.start_date <= public.bj_today() and b2.end_date >= public.bj_today()
+        order by b2.start_date desc limit 1),
+      (select b2.period_key from public.boundaries b2
+        where b2.type = 'week' and b2.deprecated = false and b2.end_date < public.bj_today()
+        order by b2.end_date desc limit 1)
+    )), public.current_week_key());
   select * into v_b from public.boundaries b
    where b.type = 'week'
      and b.period_key = v_key
@@ -7822,14 +7836,11 @@ begin
   if v_b.id is null then
     raise exception '周「%」不存在，请先在设置里立即分隔或选择其它周', v_key;
   end if;
-  if v_b.boundary_at > now() then
-    raise exception '周「%」尚未结束，请等该周汇总完成后再为小组抽奖', v_key;
+  if v_b.start_date is not null and v_b.start_date > public.bj_today() then
+    raise exception '周「%」尚未开始，不能为小组抽奖', v_key;
   end if;
-  v_end := v_b.boundary_at;
-  v_start := coalesce(
-    (select max(b.boundary_at) from public.boundaries b
-      where b.type = 'week' and b.boundary_at < v_end),
-    v_end - interval '7 days');
+  v_start := v_b.start_date::timestamp at time zone 'Asia/Shanghai';
+  v_end   := (least(v_b.end_date, public.bj_today()) + 1)::timestamp at time zone 'Asia/Shanghai';
   v_period := coalesce(public.period_key_of('month', v_b.end_date), public.current_month_key());
   v_source := case when v_pool = 'reward' then 'weekly_group_manual_reward' else 'weekly_group_manual_penalty' end;
 

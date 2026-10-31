@@ -423,7 +423,7 @@ table.data.my-list{min-width:0}
 const SUPABASE_URL = 'https://rdwbtyecityxopofjokj.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJkd2J0eWVjaXR5eG9wb2Zqb2tqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI4NDg0MzgsImV4cCI6MjEwODQyNDQzOH0.s8zcarl9bhJn1_yOtchGr1gWYCBhtM8-puiGmChFk0s';
 const EMAIL_DOMAIN = '@banji.local';
-const APP_VERSION = '2.1.2';
+const APP_VERSION = '2.1.3';
 
 /* 正式版 V2.0.0：默认连接上述 Supabase 项目；本地调试时可在页面加载前注入
    window.__SB_OVERRIDE__ = { url, key } 临时指向其他项目 */
@@ -2909,6 +2909,9 @@ function curWeekKey(){ return (APP&&APP.period&&APP.period.week_key)||''; }
 function lotWeeks(n){ return weekPeriods(n).map(b=>b.period_key); }
 function lastClosedWeekKey(){
   const today=todayStr();
+  // 优先「今天所在的周」（周未结束也可查看/抽奖），其次最近一个已结束的周
+  const cur=weekPeriods(60).find(b=>b.start_date&&b.end_date&&String(b.start_date)<=today&&String(b.end_date)>=today);
+  if(cur) return cur.period_key;
   const closed=weekPeriods(60).find(b=>b.end_date&&String(b.end_date)<today);
   return closed?closed.period_key:curWeekKey();
 }
@@ -2945,7 +2948,10 @@ function setLotWeek(v){
 }
 function lotWeekBar(allowAll){
   const cur=_lotWeek;
-  const opts=weekPeriods(12).map(b=>`<option value="${esc(b.period_key)}"${cur===b.period_key?' selected':''}>${esc(periodRangeText(b,'week'))}</option>`).join('');
+  const opts=weekPeriods(12).map(b=>{
+    const ip=b.end_date&&String(b.end_date)>=todayStr();
+    return `<option value="${esc(b.period_key)}"${cur===b.period_key?' selected':''}>${esc(periodRangeText(b,'week'))}${ip?'（进行中）':''}</option>`;
+  }).join('');
   return `<span class="lbl">小组周期（周）</span>
     <select class="field" onchange="setLotWeek(this.value)">
       ${allowAll?`<option value=""${cur===''?' selected':''}>全部</option>`:''}
@@ -3001,7 +3007,7 @@ async function renderLotDrawArea(){
         <button class="btn btn-sm ${_lotPool==='penalty'?'btn-primary':'btn-ghost'}" onclick="setLotPool('penalty')">惩罚池</button>
       </div>
       <div class="dim small">${_lotMode==='group'
-        ? '周汇总只产出排名与建议名单（前 3 名奖励、后 2 名惩罚），不再自动发抽选次数；由执行小组及以上在下方手动为小组抽奖，每组每池每周限一次，奖励全组每人各得一份、惩罚一条结果全组共担。'
+        ? '周汇总只产出排名与建议名单（前 3 名奖励、后 2 名惩罚），不再自动发抽选次数；由执行小组及以上在下方手动为小组抽奖，每组每池每周限一次，奖励全组每人各得一份、惩罚一条结果全组共担。本周未结束时也能抽（统计截至今天）。'
         : '个人抽选次数在月结算时发放（月度积分奖励、第二类追加、扣分惩罚等）；学生本人抽选，执行小组及以上可代学生抽，记录员不再代抽。'}</div>
     </div>`;
   if(_lotMode==='group') await renderLotGroupArea(modeBar);
@@ -3039,7 +3045,7 @@ async function renderLotGroupArea(modeBar){
   box.innerHTML=modeBar+`
     <div class="card">
       <div class="toolbar">
-        <h3 style="margin:0">小组抽奖 ${esc(weekLabelOf(d.week_key||lotWeekOf()))}${d.has_summary?' <span class="badge-status badge-ok">已汇总</span>':' <span class="badge-status badge-dim">未汇总</span>'}</h3>
+        <h3 style="margin:0">小组抽奖 ${esc(weekLabelOf(d.week_key||lotWeekOf()))}${d.in_progress?' <span class="badge-status badge-warn" title="本周尚未结束，统计与抽奖均截至今天">进行中</span>':''}${d.has_summary?' <span class="badge-status badge-ok">已汇总</span>':' <span class="badge-status badge-dim">未汇总</span>'}</h3>
         <select class="input" style="width:auto" onchange="setLotWeek(this.value)">${wkOptions}</select>
         ${canDraw?`<button class="btn btn-sm" onclick="toggleLotGroupAll()">全选</button>
         <button class="btn btn-sm btn-primary" onclick="batchDrawGroup()">批量抽${esc(poolName)}</button>`:''}
@@ -3057,7 +3063,7 @@ function toggleLotGroupAll(){
 async function drawGroupManual(groupName){
   const poolName=POOL_NAME[_lotPool]||_lotPool;
   const wk=lotWeekOf();
-  confirmDialog('小组抽奖', `确定为「${groupName}」抽 1 次${poolName}吗？\n每周每组每池限一次；奖励全组每人各得一份，惩罚一条结果全组共担。`, async ()=>{
+  confirmDialog('小组抽奖', `确定为「${groupName}」抽 1 次${poolName}吗？\n每周每组每池限一次；奖励全组每人各得一份，惩罚一条结果全组共担。本周未结束时按截至今天统计。`, async ()=>{
     const r=await rpc('admin_draw_group_manual',{ p_group_name:groupName, p_pool_type:_lotPool, p_week_key:wk });
     if(r.code!==0){ toast(r.msg,'err'); return; }
     const draws=(r.data&&r.data.draws)||[];
