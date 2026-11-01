@@ -340,8 +340,8 @@ table.data.my-list{min-width:0}
     </div>
     <form id="loginForm" onsubmit="doLogin(event); return false">
       <div class="field-group">
-        <label>账号（用户名或邮箱）</label>
-        <input class="field" id="loginUser" placeholder="请输入账号，如 admin" autocomplete="username">
+        <label>账号（用户名）</label>
+        <input class="field" id="loginUser" placeholder="请输入账号" autocomplete="username">
       </div>
       <div class="field-group">
         <label>密码</label>
@@ -1892,7 +1892,7 @@ function refreshSummary(){
 }
 
 /* ==========================================================
-   用户管理（仅班主任）
+   用户管理
 ========================================================== */
 function roleOptions(sel, includeSuper){
   const list=['super_admin','admin','executive','group_recorder','student'];
@@ -3007,8 +3007,8 @@ async function renderLotDrawArea(){
         <button class="btn btn-sm ${_lotPool==='penalty'?'btn-primary':'btn-ghost'}" onclick="setLotPool('penalty')">惩罚池</button>
       </div>
       <div class="dim small">${_lotMode==='group'
-        ? '周汇总只产出排名与建议名单（前 3 名奖励、后 2 名惩罚），不再自动发抽选次数；由执行小组及以上在下方手动为小组抽奖，每组每池每周限一次，奖励全组每人各得一份、惩罚一条结果全组共担。本周未结束时也能抽（统计截至今天）。'
-        : '个人抽选次数在月结算时发放（月度积分奖励、第二类追加、扣分惩罚等）；学生本人抽选，执行小组及以上可代学生抽，记录员不再代抽。'}</div>
+        ? '周汇总只产出排名与建议名单（前 3 名奖励、后 2 名惩罚）；由执行小组及以上在下方手动为小组抽奖，每组每池每周限一次，奖励全组每人各得一份、惩罚一条结果全组共担。（统计截至今天）。'
+        : '个人抽选次数在月结算时发放；学生本人抽选，执行小组及以上可代学生抽。'}</div>
     </div>`;
   if(_lotMode==='group') await renderLotGroupArea(modeBar);
   else await renderLotIndividualArea(modeBar);
@@ -3050,7 +3050,7 @@ async function renderLotGroupArea(modeBar){
         ${canDraw?`<button class="btn btn-sm" onclick="toggleLotGroupAll()">全选</button>
         <button class="btn btn-sm btn-primary" onclick="batchDrawGroup()">批量抽${esc(poolName)}</button>`:''}
       </div>
-      <div class="dim small" style="margin-bottom:8px">周汇总只产出排名与建议名单，不再自动发抽选次数。由执行小组及以上在下方手动为小组抽奖；每组每池每周限一次，如需重抽请先在「仓库管理」作废上次结果。</div>
+      <div class="dim small" style="margin-bottom:8px">周汇总产出排名与建议名单。由执行小组及以上在下方手动为小组抽奖；每组每池每周限一次，如需重抽请先在「仓库管理」作废上次结果。</div>
       ${groups.length?`<div class="table-wrap"><table class="data data-compact"><thead><tr><th></th><th>小组</th><th>本周积分</th><th>排名</th><th>${esc(poolName)}状态</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`
         :`<div class="empty">本周还没有小组积分数据。</div>`}
     </div>`;
@@ -3127,7 +3127,7 @@ async function renderLotIndividualArea(modeBar){
       </div>
       ${rows.length?`<table class="data"><thead><tr><th></th><th>学生</th><th>小组</th><th>奖励次数</th><th>惩罚次数</th><th>明细</th><th>操作</th></tr></thead><tbody>${body}</tbody></table>`
         :`<div class="empty">本周期暂无个人抽选次数。次数在管理员执行「月度结算」时发放，未使用的次数会在结算时自动抽完。</div>`}
-      ${isStu?'<div class="dim small" style="margin-top:10px">抽中的卡片可在左侧「我的仓库」查看与使用登记。</div>':(isRecorder()?'<div class="dim small" style="margin-top:10px">个人抽选已收回记录员代抽权限，请学生本人抽选，或由执行小组及以上代抽。</div>':'')}
+      ${isStu?'<div class="dim small" style="margin-top:10px">抽中的卡片可在左侧「我的仓库」查看。</div>':(isRecorder()?'<div class="dim small" style="margin-top:10px">个人抽选已收回记录员代抽权限，请学生本人抽选，或由执行小组及以上代抽。</div>':'')}
     </div>`;
 }
 function toggleLotStuAll(){
@@ -3305,7 +3305,7 @@ async function renderLotDraws(){
       <td>${esc(snap.title||'')} <span class="dim small">（每人一份，共 ${cnt} 张）</span></td>
       <td>${statusTxt||drawStatusBadge(x.status)}</td>
       <td class="nowrap dim small">${x.expire_at?esc(fmtDateTime(x.expire_at)):'长期'}</td>
-      <td class="nowrap dim small">逐张处理请在「仓库管理」<br>或学生「我的仓库」中操作</td>
+      <td class="nowrap dim small">逐张处理请在「仓库管理」</td>
     </tr>`;
   }).join('');
   document.getElementById('lotBody').innerHTML = `
@@ -3538,7 +3538,7 @@ async function renderWeekSummaries(){
         <div class="dim small">奖励小组：${(s.reward_groups||[]).map(g=>g.group_name||g).join('、')||'无'}　｜　惩罚小组：${(s.penalty_groups||[]).map(g=>g.group_name||g).join('、')||'无'}</div>
         <div class="dim small">建议奖励小组：${esc(((s.reward_groups||[]).map(g=>g.group_name).join('、'))||'无')}　｜　建议惩罚小组：${esc(((s.penalty_groups||[]).map(g=>g.group_name).join('、'))||'无')}　｜　抽奖请到「奖惩抽选 → 小组（集体）」由执行小组及以上手动进行</div>`}
       </div>`;
-  }).join('') : `<div class="card"><div class="empty">暂无周汇总。由管理员点「汇总本周 / 立即汇总上周」生成（系统不自动汇总）。</div></div>`);
+  }).join('') : `<div class="card"><div class="empty">暂无周汇总。由管理员点「汇总本周 / 立即汇总上周」生成。</div></div>`);
 }
 function monthPeriodLabel(key){
   const b=(DB.boundaries||[]).find(x=>String(x.type||'')==='month'&&String(x.period_key||'')===String(key||''));
@@ -4110,7 +4110,7 @@ async function renderMyWarehouse(){
   const r=await rpc('list_lottery_draws',{ p_scope:'self', p_limit:200 });
   const list=(r.code===0 && r.data && r.data.draws) ? r.data.draws : [];
   DB._drawCache=list;
-  const cards=[['unused','未使用','可以随时使用，功能卡请在下一个月分隔点前用掉'],['used','已使用',''],['expired','已过期','过期卡如需补登记，请联系执行小组及以上老师'],['void','已作废','']];
+  const cards=[['unused','未使用','可以随时使用，功能卡请在下月前用掉'],['used','已使用',''],['expired','已过期','过期卡如需补登记，请联系班委或老师'],['void','已作废','']];
   const section=cards.map(([st,label,tip])=>{
     const items=list.filter(x=>x.status===st);
     if(!items.length) return '';
@@ -4134,7 +4134,7 @@ async function renderMyWarehouse(){
   const posted=list.filter(x=>x.status==='posted');
   document.getElementById('page').innerHTML=`
     ${pageHeader('我的仓库')}
-    <div class="card"><div class="desc">这里是你的抽选结果仓库：功能卡（免罚卡、免扣分卡、指定惩罚卡、免值日卡、万能卡等）需要在使用后由老师「标记已使用」；星光卡、扣星光、文本惩罚抽中即生效，不需要登记。</div></div>
+    <div class="card"><div class="desc">这里是你的抽选结果仓库：功能卡（免罚卡、免扣分卡、指定惩罚卡、免值日卡、万能卡等）需要在使用后由班委或老师「标记已使用」；星光卡、扣星光、文本惩罚抽中即生效，不需要登记。</div></div>
     ${section||'<div class="card"><div class="empty">仓库里还没有抽选结果</div></div>'}
     ${posted.length?`<div class="settings-card"><h3>已即时生效 <span class="dim small">${posted.length}</span></h3>
       <div class="table-wrap"><table class="data data-compact"><thead><tr><th>时间</th><th>拥有者</th><th>类型</th><th>结果</th></tr></thead>
@@ -4426,7 +4426,7 @@ async function renderStarlightLedger(){
         <button class="btn btn-sm btn-primary" onclick="openStarlightAdjust()">手动增减星光</button>
         <button class="btn btn-sm" onclick="setSlTab('table')">表格预览 / 编辑</button>
         ${canSuper()?`<button class="btn btn-sm btn-ghost" onclick="termResetStarlight()">学期清零</button>`:''}
-        <span class="dim small">星光值与积分独立；学期清零前会自动保存快照。</span>
+        <span class="dim small">星光值与积分独立</span>
       </div>
       <div class="table-wrap"><table class="data"><thead><tr><th>#</th><th>姓名</th><th>小组</th><th>星光值</th></tr></thead>
       <tbody>${accounts.length?accounts.map(a=>`<tr><td>${a.rank||''}</td><td>${esc(a.name)}</td><td>${esc(a.group_name||'')}</td><td>${a.balance}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">暂无学生</td></tr>'}</tbody></table></div>
