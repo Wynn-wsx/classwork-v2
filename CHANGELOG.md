@@ -20,15 +20,17 @@
   后端 `starlight_table(p_month_key)` 支持不传月份（返回 `month_key='all'`）；传 `YYYY-MM` 时仍按该月统计（向后兼容）。
 - 周期汇总页「查看周期」下拉：**当前周期（本周/本月）始终排在第一位**并标注「（本周）/（本月）」，
   修复上一版「瘦身」逻辑把尚无汇总的当前周期挤出选项、导致看不到当前周期的问题。
+- 后端 `list_summary_periods` 的周列表改为「列出已开始（含进行中）的周」，不再只列已结束的周；
+  `get_period_summary` 同步允许读取进行中的周汇总（否则下拉选了也报错）。
 - 版本号统一：前端 `APP_VERSION`、README、CHANGELOG 顶部条目统一为 2.1.4。
 
 ### 升级
-- 数据库：执行 `supabase/patch_v2.1.4_星光台账累计.sql`（幂等，替换 `starlight_table` 并刷新 PostgREST 缓存）。
+- 数据库：执行 `supabase/patch_v2.1.4_星光台账与周期下拉.sql`（幂等，替换 `starlight_table`、`list_summary_periods`、`get_period_summary` 并刷新 PostgREST 缓存）。
 - 前端：发布 `index.html`（无构建，直接覆盖）。
 
 ### 验证
 - PGlite：`test_v214_starlight.mjs` 3/3（不传月份=全部累计 7 / 传月份仍按该月 5、2 / 非法月份报错）。
-- 线上：版本 2.1.4，星光台账无月份下拉、列名为「累计变动」，周期下拉首项为当前周期。
+- 线上：版本 2.1.4，星光台账无月份下拉、列名为「累计变动」；周汇总下拉首项为「2026-10-26 ~ 2026-11-01（本周）」。
 
 ## [2.1.3] - 2026-11-01（奖惩抽选支持「进行中」的周）
 

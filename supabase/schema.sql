@@ -11,7 +11,7 @@
 -- is_supervisor_now -> current_week_key）。关闭“创建函数时校验函数体”，
 -- 函数首次被调用时仍会完整校验，不影响运行期正确性。
 set check_function_bodies = off;
---  生成时间：2026-11-01 12:03:46
+--  生成时间：2026-11-01 12:17:43
 
 --  【脚本目录】（在 SQL Editor 里搜索下面的标题文字可快速定位）
 --   1. 扩展（pgcrypto）
@@ -6224,7 +6224,7 @@ revoke all on function public.admin_create_immediate_boundary(text) from public,
 grant execute on function public.admin_create_immediate_boundary(text) to authenticated;
 
 -- ------------------------------------------------------------
--- 汇总周期下拉：列出过去周期的分隔点及是否已有汇总
+-- 汇总周期下拉：列出已开始周期的分隔点及是否已有汇总
 -- ------------------------------------------------------------
 create or replace function public.list_summary_periods(
   p_type  text default 'week',
@@ -6243,7 +6243,7 @@ begin
   end if;
 
   if p_type = 'week' then
-    -- 只列「已结束」的周（进行中的周还没有汇总意义）
+    -- 列出已开始（含进行中）的周；尚未开始的未来周不列
     select coalesce(jsonb_agg(x order by (x->>'start_date') desc), '[]'::jsonb) into v_list
       from (
         select jsonb_build_object(
@@ -6261,7 +6261,7 @@ begin
           from public.boundaries b
          where b.type = 'week'
            and b.start_date is not null
-           and coalesce(b.end_date, b.start_date) < public.bj_today()
+           and b.start_date <= public.bj_today()
          order by b.start_date desc
          limit greatest(coalesce(p_limit, 60), 1)
       ) q;
@@ -6326,9 +6326,9 @@ begin
 
   if p_type = 'week' then
     select * into v_bd from public.boundaries
-     where type = 'week' and boundary_at <= now()
+     where type = 'week' and start_date <= public.bj_today()
       and period_key = v_key
-     order by boundary_at desc limit 1;
+     order by start_date desc limit 1;
     if v_bd.id is null then
       raise exception '找不到周「%」的分隔点', v_key;
     end if;
