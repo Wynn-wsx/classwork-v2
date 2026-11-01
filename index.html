@@ -4350,10 +4350,10 @@ async function renderStarlightLedger(){
       ${tabBar}
       <div class="card">
         <div class="toolbar">
-          <span class="dim small">余额与「累计变动」都按全部流水统计，不再按月份筛选。</span>
+          <span class="dim small">余额与「累计变动」都按全部流水统计</span>
         </div>
         <div class="table-wrap"><table class="data data-compact">
-          <thead><tr><th>#</th><th>姓名</th><th>小组</th><th>当前星光（可直接改）</th><th>累计变动</th><th>流水条数</th><th>最近变动</th><th>最近说明</th>${canEdit?'<th>操作</th>':''}</tr></thead>
+          <thead><tr><th>#</th><th>姓名</th><th>小组</th><th>当前星光（可编辑）</th><th>累计变动</th><th>流水条数</th><th>最近变动</th><th>最近说明</th>${canEdit?'<th>操作</th>':''}</tr></thead>
           <tbody>${items.length?items.map((x,i)=>`<tr>
             <td>${i+1}</td><td>${esc(x.name)}</td><td>${esc(x.group_name||'')}</td>
             <td>${canEdit
@@ -4369,7 +4369,7 @@ async function renderStarlightLedger(){
           <span class="lbl">修改说明</span>
           <input class="input" id="slSaveNote" placeholder="例如：核对 10 月星光后修正（可不填）" style="width:280px">
           <button class="btn btn-sm btn-primary" onclick="saveStarlightTable()">保存表格修改</button>
-          <span class="dim small">直接在“当前星光”格子里改数字即可，系统按差额自动生成一条手动流水（会记进星光流水，可追溯）。</span>
+          <span class="dim small">直接填写数字即可，系统按差额自动生成一条手动流水（将会记进星光流水，可追溯）。</span>
         </div>`:''}
       </div>`;
     return;
@@ -4426,7 +4426,7 @@ async function renderStarlightLedger(){
         <button class="btn btn-sm btn-primary" onclick="openStarlightAdjust()">手动增减星光</button>
         <button class="btn btn-sm" onclick="setSlTab('table')">表格预览 / 编辑</button>
         ${canSuper()?`<button class="btn btn-sm btn-ghost" onclick="termResetStarlight()">学期清零</button>`:''}
-        <span class="dim small">星光值与积分独立，不做实物兑换；学期清零前会自动保存快照。</span>
+        <span class="dim small">星光值与积分独立；学期清零前会自动保存快照。</span>
       </div>
       <div class="table-wrap"><table class="data"><thead><tr><th>#</th><th>姓名</th><th>小组</th><th>星光值</th></tr></thead>
       <tbody>${accounts.length?accounts.map(a=>`<tr><td>${a.rank||''}</td><td>${esc(a.name)}</td><td>${esc(a.group_name||'')}</td><td>${a.balance}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">暂无学生</td></tr>'}</tbody></table></div>
