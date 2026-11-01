@@ -11,7 +11,7 @@
 -- is_supervisor_now -> current_week_key）。关闭“创建函数时校验函数体”，
 -- 函数首次被调用时仍会完整校验，不影响运行期正确性。
 set check_function_bodies = off;
---  生成时间：2026-11-01 03:06:27
+--  生成时间：2026-11-01 12:03:46
 
 --  【脚本目录】（在 SQL Editor 里搜索下面的标题文字可快速定位）
 --   1. 扩展（pgcrypto）
@@ -6562,8 +6562,9 @@ begin
     '没有权限查看星光台账'
   );
   v_role  := public.caller_role();
-  v_month := coalesce(nullif(btrim(coalesce(p_month_key, '')), ''), public.current_month_key());
-  if v_month !~ '^\d{4}-\d{2}$' then
+  -- 不传月份 = 统计全部流水（累计变动），表格预览已取消「统计月份」筛选
+  v_month := nullif(btrim(coalesce(p_month_key, '')), '');
+  if v_month is not null and v_month !~ '^\d{4}-\d{2}$' then
     raise exception '月份格式应为 YYYY-MM';
   end if;
   v_group := case when v_role = 'group_recorder' then public.my_group_name() else null end;
@@ -6580,7 +6581,7 @@ begin
       left join (
         select l.student_id, sum(l.change_amount)::int as month_change
           from public.starlight_logs l
-         where l.period_key = v_month
+         where v_month is null or l.period_key = v_month
          group by l.student_id
       ) mc on mc.student_id = s.id
       left join (
@@ -6607,7 +6608,7 @@ begin
     from base;
 
   return jsonb_build_object(
-    'month_key', v_month,
+    'month_key', coalesce(v_month, 'all'),
     'scope',     case when v_group is null then 'all' else 'group' end,
     'items',     v_out
   );
