@@ -5,8 +5,7 @@
 - 线上地址：<https://wynn-wsx.github.io/classwork-v2/>（V2.0 正式版）
 - 源码仓库：<https://github.com/Wynn-wsx/classwork-v2>
 - 线上后端：Supabase（PostgreSQL + Auth + RLS）
-- 当前版本：网页版 **V2.1.3（正式版）**；旧版 V1.6 站点 <https://wynn-wsx.github.io/classwork/> 保留作回退
-
+- 当前版本：网页版 **V2.1.3（正式版）**
 ## 项目状态（重要）
 
 | 部分 | 状态 | 说明 |
